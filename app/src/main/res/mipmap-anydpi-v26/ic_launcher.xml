@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background"/>
+    <foreground>
+        <vector
+            android:width="108dp"
+            android:height="108dp"
+            android:viewportWidth="108"
+            android:viewportHeight="108">
+            
+            <!-- Modern outer hexagonal shield for a premium tech vibe -->
+            <path
+                android:pathData="M54,16 L88,36 L88,72 L54,92 L20,72 L20,36 Z"
+                android:fillColor="#1A1A26"/>
+                
+            <!-- Outer border ring matching our purple brand color -->
+            <path
+                android:pathData="M54,18 L86,37 L86,71 L54,90 L22,71 L22,37 Z"
+                android:strokeColor="#7B61FF"
+                android:strokeWidth="2"
+                android:fillColor="#00000000"/>
+
+            <!-- Futuristic "T" merging with a play arrow -->
+            <!-- Horizontal top bar of the T -->
+            <path
+                android:pathData="M34,40 L74,40 C77,40 77,46 74,46 L34,46 C31,46 31,40 34,40 Z"
+                android:fillColor="#7B61FF"/>
+                
+            <!-- Vertical stem of the T pointing downwards and ending as a sharp play button/arrow -->
+            <path
+                android:pathData="M51,46 L57,46 L57,60 L66,60 C69,60 71,64 68,67 L56,79 C55,80 53,80 52,79 L40,67 C37,64 39,60 42,60 L51,60 Z"
+                android:fillColor="#5B8DEF"/>
+        </vector>
+    </foreground>
+</adaptive-icon>

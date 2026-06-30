@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    
+    <!-- Background gradient -->
+    <path
+        android:pathData="M0,0h320v180h-320z"
+        android:fillColor="#0D0D14"/>
+    
+    <!-- Accent bar -->
+    <path
+        android:pathData="M0,0h320v4h-320z"
+        android:fillColor="#7B61FF"/>
+    
+    <!-- Play icon -->
+    <path
+        android:pathData="M140,60 L140,120 L190,90 Z"
+        android:fillColor="#7B61FF"/>
+    
+    <!-- T letter -->
+    <path
+        android:pathData="M195,70 L235,70 L235,78 L220,78 L220,120 L210,120 L210,78 L195,78 Z"
+        android:fillColor="#E8E6F0"/>
+</vector>

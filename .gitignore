@@ -1,0 +1,26 @@
+# Android Studio / IntelliJ
+.idea/
+*.iml
+.gradle/
+local.properties
+.kotlin/
+.navigation/
+
+# Build outputs
+build/
+/build
+app/build/
+/app/build
+*.apk
+*.aar
+*.ap_
+
+# NDK
+.cxx/
+
+# Log files
+*.log
+
+# System files
+.DS_Store
+Thumbs.db

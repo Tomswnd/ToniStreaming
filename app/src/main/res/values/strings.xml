@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ToniStreaming</string>
+    <string name="loading">Caricamento…</string>
+    <string name="error_network">Errore di connessione. Verifica la rete e riprova.</string>
+    <string name="error_scraping">Impossibile caricare il contenuto. Il sito potrebbe essere cambiato.</string>
+    <string name="error_cloudflare">Verifica di sicurezza in corso…</string>
+    <string name="error_stream">Impossibile riprodurre il video.</string>
+    <string name="retry">Riprova</string>
+    <string name="search_hint">Cerca anime…</string>
+    <string name="no_results">Nessun risultato trovato</string>
+    <string name="episode_prefix">Ep. %d</string>
+    <string name="watching_history">Cronologia</string>
+    <string name="continue_watching">Continua a guardare</string>
+    <string name="popular">Popolari</string>
+    <string name="latest">Ultimi aggiunti</string>
+    <string name="genres">Generi</string>
+    <string name="synopsis">Trama</string>
+    <string name="episodes">Episodi</string>
+    <string name="play">Riproduci</string>
+    <string name="pause">Pausa</string>
+    <string name="next_episode">Episodio successivo</string>
+    <string name="previous_episode">Episodio precedente</string>
+</resources>
