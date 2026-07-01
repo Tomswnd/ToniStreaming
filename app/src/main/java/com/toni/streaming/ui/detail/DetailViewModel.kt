@@ -1,5 +1,6 @@
 package com.toni.streaming.ui.detail
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.toni.streaming.data.local.WatchHistoryEntity
@@ -9,6 +10,7 @@ import com.toni.streaming.data.repository.AnimeRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -24,8 +26,19 @@ data class DetailUiState(
     val animeDetails: AnimeDetails? = null,
     val episodes: List<EpisodeWithProgress> = emptyList(),
     val isLoading: Boolean = true,
-    val error: String? = null
-)
+    val error: String? = null,
+    val totalEpisodes: Int = 0,
+    val isLoadingMore: Boolean = false,
+    val isFavorite: Boolean = false
+) {
+    /** True when there are further episodes that can be lazily loaded. */
+    val canLoadMore: Boolean get() = episodes.size < totalEpisodes
+    /** Episode number range that the "load more" action will fetch next. */
+    val nextRangeStart: Int get() = (episodes.maxOfOrNull { it.episode.number } ?: episodes.size) + 1
+    val nextRangeEnd: Int get() = minOf(nextRangeStart + PAGE_SIZE - 1, totalEpisodes)
+}
+
+private const val PAGE_SIZE = 120
 
 class DetailViewModel(
     private val repository: AnimeRepository,
@@ -38,6 +51,28 @@ class DetailViewModel(
 
     init {
         loadDetails()
+        observeFavorite()
+    }
+
+    private fun observeFavorite() {
+        viewModelScope.launch {
+            repository.isFavorite(animeId).collect { fav ->
+                _uiState.update { it.copy(isFavorite = fav) }
+            }
+        }
+    }
+
+    fun toggleFavorite() {
+        val details = _uiState.value.animeDetails ?: return
+        viewModelScope.launch {
+            repository.toggleFavorite(
+                animeId = animeId,
+                title = details.title,
+                imageUrl = details.imageUrl,
+                animeUrl = animeUrl,
+                coverUrl = details.coverUrl
+            )
+        }
     }
 
     fun loadDetails() {
@@ -61,6 +96,7 @@ class DetailViewModel(
                         it.copy(
                             animeDetails = details,
                             episodes = episodesWithProgress,
+                            totalEpisodes = details.totalEpisodes,
                             isLoading = false
                         )
                     }
@@ -72,6 +108,44 @@ class DetailViewModel(
                             error = error.message ?: "Errore nel caricamento dei dettagli"
                         )
                     }
+                }
+            )
+        }
+    }
+
+    /**
+     * Lazily loads the next page (~120) of episodes and appends them to the list.
+     */
+    fun loadMoreEpisodes() {
+        val state = _uiState.value
+        if (state.isLoadingMore || !state.canLoadMore) return
+
+        val start = state.nextRangeStart
+        val end = state.nextRangeEnd
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoadingMore = true) }
+
+            repository.getEpisodesRange(animeId, animeUrl, start, end).fold(
+                onSuccess = { newEpisodes ->
+                    val progressMap = repository.getWatchHistoryForAnime(animeId)
+                        .associateBy { it.episodeId }
+
+                    _uiState.update { current ->
+                        val existingIds = current.episodes.mapTo(HashSet()) { it.episode.id }
+                        val appended = newEpisodes
+                            .filter { it.id !in existingIds }
+                            .map { EpisodeWithProgress(it, progressMap[it.id]) }
+
+                        val merged = (current.episodes + appended)
+                            .sortedBy { it.episode.number }
+
+                        current.copy(episodes = merged, isLoadingMore = false)
+                    }
+                },
+                onFailure = { error ->
+                    Log.e("DetailViewModel", "loadMoreEpisodes failed", error)
+                    _uiState.update { it.copy(isLoadingMore = false) }
                 }
             )
         }

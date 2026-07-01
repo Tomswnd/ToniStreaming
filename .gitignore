@@ -24,3 +24,8 @@ app/build/
 # System files
 .DS_Store
 Thumbs.db
+
+# Release signing (keep these secret, do NOT commit)
+keystore.properties
+*.jks
+*.keystore

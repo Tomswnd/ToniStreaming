@@ -26,7 +26,8 @@ class PlayerViewModel(
     private val repository: AnimeRepository,
     private val animeId: String,
     private var episodeId: String,
-    private var episodeUrl: String
+    private var episodeUrl: String,
+    private var episodeNumber: Int = 0
 ) : ViewModel() {
 
     companion object {
@@ -44,6 +45,7 @@ class PlayerViewModel(
         viewModelScope.launch {
             episodeId = episode.id
             episodeUrl = episode.url
+            episodeNumber = episode.number
             loadProgressAndExtractStream()
         }
     }
@@ -108,29 +110,49 @@ class PlayerViewModel(
         viewModelScope.launch {
             try {
                 val animeUrl = "https://www.animeunity.so/anime/${animeId}-${streamInfo.animeSlug}"
-                Log.d(TAG, "Fetching episodes from: $animeUrl to find the next episode")
-                
+                Log.d(TAG, "Resolving next episode for anime $animeId (current ep number: $episodeNumber)")
+
+                // Only the first page is fetched here (fast). It also gives us the real total.
                 repository.getAnimeDetails(animeUrl, animeId).fold(
                     onSuccess = { details ->
-                        val episodes = details.episodes
-                        // Find the current episode in the list
-                        val currentEp = episodes.find { it.id == episodeId || it.url == episodeUrl }
-                        
-                        if (currentEp != null) {
-                            _uiState.update { it.copy(currentEpisodeNumber = currentEp.number) }
-                            
-                            // Find the episode with number = currentEpisode.number + 1
-                            val nextEp = episodes.find { it.number == currentEp.number + 1 }
-                            if (nextEp != null) {
-                                Log.i(TAG, "Found next episode: Ep. ${nextEp.number} (ID: ${nextEp.id})")
-                                _uiState.update { it.copy(nextEpisode = nextEp) }
-                            } else {
-                                Log.i(TAG, "No next episode found (this might be the last episode).")
-                            }
+                        val firstPage = details.episodes
+
+                        // Prefer the episode number passed via navigation; fall back to locating
+                        // the current episode inside the first page if it wasn't provided.
+                        val currentNumber = if (episodeNumber > 0) {
+                            episodeNumber
+                        } else {
+                            firstPage.find { it.id == episodeId || it.url == episodeUrl }?.number ?: 0
+                        }
+
+                        if (currentNumber <= 0) {
+                            Log.w(TAG, "Could not determine current episode number; skipping next-episode lookup")
+                            return@fold
+                        }
+
+                        _uiState.update { it.copy(currentEpisodeNumber = currentNumber) }
+
+                        val nextNumber = currentNumber + 1
+                        if (nextNumber > details.totalEpisodes) {
+                            Log.i(TAG, "Episode $currentNumber is the last one (total ${details.totalEpisodes}).")
+                            return@fold
+                        }
+
+                        // Next episode is usually within the first page; otherwise fetch just that one.
+                        val nextEp = firstPage.find { it.number == nextNumber }
+                            ?: repository.getEpisodesRange(animeId, animeUrl, nextNumber, nextNumber)
+                                .getOrNull()
+                                ?.firstOrNull { it.number == nextNumber }
+
+                        if (nextEp != null) {
+                            Log.i(TAG, "Found next episode: Ep. ${nextEp.number} (ID: ${nextEp.id})")
+                            _uiState.update { it.copy(nextEpisode = nextEp) }
+                        } else {
+                            Log.i(TAG, "No next episode resolved for number $nextNumber.")
                         }
                     },
                     onFailure = { err ->
-                        Log.e(TAG, "Failed to fetch episodes list for next episode detection", err)
+                        Log.e(TAG, "Failed to fetch details for next-episode detection", err)
                     }
                 )
             } catch (e: Exception) {

@@ -53,6 +53,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -86,9 +89,10 @@ fun PlayerScreen(
     episodeUrl: String,
     repository: AnimeRepository,
     onBack: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    episodeNumber: Int = 0
 ) {
-    val viewModel = remember { PlayerViewModel(repository, animeId, episodeId, episodeUrl) }
+    val viewModel = remember { PlayerViewModel(repository, animeId, episodeId, episodeUrl, episodeNumber) }
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
 
@@ -197,6 +201,17 @@ private fun VideoPlayer(
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         isPlaybackEnded = playbackState == androidx.media3.common.Player.STATE_ENDED
                     }
+
+                    override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        // Keep the screen awake while the video is actually playing;
+                        // allow it to time out normally when paused/stopped.
+                        val window = (context as? Activity)?.window ?: return
+                        if (isPlaying) {
+                            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        } else {
+                            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        }
+                    }
                 })
                 setMediaItem(mediaItem)
                 if (startPositionMs > 0) {
@@ -231,6 +246,18 @@ private fun VideoPlayer(
         }
     }
 
+    // Pause playback when the app goes to the background so it doesn't keep playing off-screen.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, exoPlayer) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                exoPlayer.pause()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             val currentPos = exoPlayer.currentPosition
@@ -250,6 +277,9 @@ private fun VideoPlayer(
                 }
             }
             exoPlayer.release()
+            // Make sure the screen can time out again once we leave the player.
+            (context as? Activity)?.window
+                ?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
 

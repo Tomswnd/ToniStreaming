@@ -4,6 +4,7 @@ import android.util.Log
 import com.toni.streaming.data.model.Anime
 import com.toni.streaming.data.model.AnimeDetails
 import com.toni.streaming.data.model.Episode
+import com.toni.streaming.data.model.RelatedAnime
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Cookie
@@ -134,13 +135,19 @@ class AnimeUnityScraper {
         var animeImageUrl = ""
         var animeSlug = ""
 
-        val videoPlayer = doc.selectFirst("video-player")
+        val videoPlayer = doc.selectFirst("video-player[episodes_count]")
+            ?: doc.selectFirst("video-player")
         if (videoPlayer != null) {
             val animeJson = videoPlayer.attr("anime")
             if (animeJson.isNotBlank()) {
-                animeTitle = extractJsonString(animeJson, "title") ?: ""
-                animeImageUrl = extractJsonString(animeJson, "imageurl") ?: ""
-                animeSlug = extractJsonString(animeJson, "slug") ?: ""
+                animeTitle = cleanText(
+                    extractTopLevelJsonString(animeJson, "title_it")
+                        ?: extractTopLevelJsonString(animeJson, "title_eng")
+                        ?: extractTopLevelJsonString(animeJson, "title")
+                        ?: ""
+                )
+                animeImageUrl = extractTopLevelJsonString(animeJson, "imageurl") ?: ""
+                animeSlug = extractTopLevelJsonString(animeJson, "slug") ?: ""
             }
         }
 
@@ -166,22 +173,30 @@ class AnimeUnityScraper {
      * Fetches the episode list for a specific anime.
      * Episodes are embedded in a Vue component as JSON in the anime detail page.
      */
+    /**
+     * Fetches the FIRST page of episodes (the batch AnimeUnity embeds in the page, ~120 max).
+     * Use [getEpisodesRange] to lazily load further pages on demand.
+     */
     suspend fun getEpisodes(animeUrl: String, animeId: String): List<Episode> = withContext(Dispatchers.IO) {
         val doc = fetchDocument(animeUrl)
-
-        // AnimeUnity embeds episode data in a Vue component
-        // Look for video-player or similar components with episodes attribute
-        val episodes = parseEpisodesFromPage(doc, animeId, animeUrl)
-        Log.d(TAG, "getEpisodes: Parsed ${episodes.size} episodes from page attributes")
-
-        if (episodes.isNotEmpty()) {
-            return@withContext episodes
+        val episodes = parseEpisodesFromPage(doc, animeId, animeUrl).ifEmpty {
+            parseEpisodesFromScript(doc, animeId, animeUrl)
         }
+        Log.d(TAG, "getEpisodes: parsed ${episodes.size} episodes (first page)")
+        episodes
+    }
 
-        // Fallback: parse from script tags
-        val fallbackEpisodes = parseEpisodesFromScript(doc, animeId, animeUrl)
-        Log.d(TAG, "getEpisodes: Parsed ${fallbackEpisodes.size} episodes from script tag fallback")
-        fallbackEpisodes
+    /**
+     * Lazily fetches a window of episodes (by episode number) from AnimeUnity's
+     * paginated info_api endpoint. Used to load episodes beyond the first embedded page.
+     */
+    suspend fun getEpisodesRange(
+        animeId: String,
+        animeUrl: String,
+        start: Int,
+        end: Int
+    ): List<Episode> = withContext(Dispatchers.IO) {
+        fetchEpisodesFromApi(animeId, animeUrl, start, end, csrfToken = "")
     }
 
     suspend fun getAnimeDetails(animeUrl: String, animeId: String): AnimeDetails = withContext(Dispatchers.IO) {
@@ -189,15 +204,30 @@ class AnimeUnityScraper {
 
         var title = ""
         var imageUrl = ""
+        var coverUrl: String? = null
         var plot = ""
+        var score = 0f
 
-        val videoPlayer = doc.selectFirst("video-player")
+        // Prefer the main <video-player> (the one carrying episode data) for metadata.
+        val videoPlayer = doc.selectFirst("video-player[episodes_count]")
+            ?: doc.selectFirst("video-player")
         if (videoPlayer != null) {
             val animeJson = videoPlayer.attr("anime")
             if (animeJson.isNotBlank()) {
-                title = cleanText(extractJsonString(animeJson, "title") ?: "")
-                imageUrl = extractJsonString(animeJson, "imageurl") ?: ""
-                plot = cleanText(extractJsonString(animeJson, "plot") ?: "")
+                // Use a depth-aware extractor so we read the TOP-LEVEL title and not a nested
+                // related-anime title (the regex extractor skips a null "title" and would otherwise
+                // grab a nested one, e.g. showing "One Piece: ...Ganzack" instead of "One Piece").
+                // Prefer the Italian title, then English, then the original field.
+                title = cleanText(
+                    extractTopLevelJsonString(animeJson, "title_it")
+                        ?: extractTopLevelJsonString(animeJson, "title_eng")
+                        ?: extractTopLevelJsonString(animeJson, "title")
+                        ?: ""
+                )
+                imageUrl = extractTopLevelJsonString(animeJson, "imageurl") ?: ""
+                coverUrl = extractTopLevelJsonString(animeJson, "imageurl_cover")
+                plot = cleanText(extractTopLevelJsonString(animeJson, "plot") ?: "")
+                score = extractTopLevelJsonString(animeJson, "score")?.toFloatOrNull() ?: 0f
             }
         }
 
@@ -205,12 +235,63 @@ class AnimeUnityScraper {
             parseEpisodesFromScript(doc, animeId, animeUrl)
         }
 
+        // Real total from the <video-player episodes_count> attribute (falls back to what we parsed).
+        val rawCount = videoPlayer?.attr("episodes_count")?.trim().orEmpty()
+        val totalEpisodes = rawCount.toIntOrNull()?.coerceAtLeast(episodes.size) ?: episodes.size
+
+        val related = parseRelatedAnime(doc, currentAnimeId = animeId)
+        Log.d(TAG, "getAnimeDetails: ${episodes.size} eps (total $totalEpisodes), ${related.size} related")
+
         AnimeDetails(
             title = title,
             plot = plot,
             imageUrl = imageUrl,
-            episodes = episodes
+            coverUrl = coverUrl,
+            episodes = episodes,
+            score = score,
+            totalEpisodes = totalEpisodes,
+            related = related
         )
+    }
+
+    /**
+     * Parses the "Anime Correlati" section (other seasons/movies/specials) into a
+     * chronologically ordered list. Each entry lives in a <div class="related-item">.
+     */
+    private fun parseRelatedAnime(doc: Document, currentAnimeId: String): List<RelatedAnime> {
+        val yearRegex = """(19|20)\d{2}""".toRegex()
+        val items = doc.select("div.related-item").mapNotNull { item ->
+            val link = item.selectFirst("a[href*=/anime/]") ?: return@mapNotNull null
+            val href = link.attr("href")
+            val path = href.substringAfter("/anime/", "").trim('/')
+            if (path.isBlank()) return@mapNotNull null
+
+            val id = path.substringBefore("-")
+            val slug = path.substringAfter("-", "")
+            if (id == currentAnimeId) return@mapNotNull null // skip self
+
+            val title = item.selectFirst("strong.related-anime-title")?.text()?.let { cleanText(it) }
+                ?: item.selectFirst(".related-anime-title")?.text()?.let { cleanText(it) }
+                ?: return@mapNotNull null
+            val imageUrl = item.selectFirst("img")?.attr("src").orEmpty()
+            val info = item.selectFirst(".related-info")?.text()?.trim().orEmpty()
+            val year = yearRegex.find(info)?.value?.toIntOrNull() ?: 0
+            val url = if (href.startsWith("http")) href else "$BASE_URL$href"
+
+            RelatedAnime(
+                id = id,
+                slug = slug,
+                title = title,
+                imageUrl = imageUrl,
+                url = url,
+                info = info,
+                year = year
+            )
+        }
+        // De-duplicate by id (some pages list ITA/SUB variants twice) and order chronologically.
+        return items
+            .distinctBy { it.id }
+            .sortedBy { if (it.year == 0) Int.MAX_VALUE else it.year }
     }
 
     /**
@@ -355,8 +436,10 @@ class AnimeUnityScraper {
     private fun parseAnimeObject(json: String): Anime? {
         return try {
             val id = extractJsonValue(json, "id") ?: return null
-            val title = extractJsonString(json, "title")
-                ?: extractJsonString(json, "title_eng") ?: return null
+            // Prefer the Italian title, then English, then the original field.
+            val title = extractJsonString(json, "title_it")
+                ?: extractJsonString(json, "title_eng")
+                ?: extractJsonString(json, "title") ?: return null
             val imageUrl = extractJsonString(json, "imageurl") ?: ""
             val coverUrl = extractJsonString(json, "imageurl_cover")
             val slug = extractJsonString(json, "slug") ?: ""
@@ -367,11 +450,18 @@ class AnimeUnityScraper {
             val score = extractJsonString(json, "score")?.toFloatOrNull() ?: 0f
             val year = extractJsonString(json, "date")?.take(4)?.toIntOrNull() ?: 0
             val isDub = extractJsonValue(json, "dub") == "1"
-            val titleSuffix = if (isDub) " (ITA)" else ""
+            // Only append the "(ITA)" dub marker if the title doesn't already carry it,
+            // otherwise some entries end up labelled "... (ITA) (ITA)".
+            val cleanTitle = cleanText(title)
+            val finalTitle = if (isDub && !cleanTitle.contains("(ITA)", ignoreCase = true)) {
+                "$cleanTitle (ITA)"
+            } else {
+                cleanTitle
+            }
 
             Anime(
                 id = id,
-                title = cleanText(title + titleSuffix),
+                title = finalTitle,
                 imageUrl = imageUrl,
                 coverUrl = coverUrl,
                 synopsis = cleanText(synopsis),
@@ -403,6 +493,65 @@ class AnimeUnityScraper {
             }
         }
         return emptyList()
+    }
+
+    /**
+     * Fetches a single window of episodes from AnimeUnity's paginated JSON endpoint.
+     * Session cookies are attached automatically by the shared cookie jar.
+     */
+    private fun fetchEpisodesFromApi(
+        animeId: String,
+        animeUrl: String,
+        start: Int,
+        end: Int,
+        csrfToken: String
+    ): List<Episode> {
+        val url = "$BASE_URL/info_api/$animeId/1?start_range=$start&end_range=$end"
+        val builder = Request.Builder()
+            .url(url)
+            .header("User-Agent", USER_AGENT)
+            .header("Accept", "application/json, text/plain, */*")
+            .header("Accept-Language", "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7")
+            .header("Referer", animeUrl)
+            .header("X-Requested-With", "XMLHttpRequest")
+        if (csrfToken.isNotBlank()) {
+            builder.header("X-CSRF-TOKEN", csrfToken)
+        }
+
+        val response = httpClient.newCall(builder.build()).execute()
+        if (response.code != 200) {
+            response.close()
+            Log.w(TAG, "info_api returned ${response.code} for range $start-$end")
+            return emptyList()
+        }
+        val body = response.body?.string() ?: ""
+        response.close()
+
+        Log.d(TAG, "info_api range $start-$end fetched (${body.length} bytes)")
+        return parseJsonEpisodesArray(extractEpisodesArray(body), animeId, animeUrl)
+    }
+
+    /**
+     * Extracts the "episodes":[...] array from the info_api JSON response using a
+     * balanced-bracket scan. Falls back to the whole body if the key is absent.
+     */
+    private fun extractEpisodesArray(json: String): String {
+        val keyIndex = json.indexOf("\"episodes\"")
+        if (keyIndex == -1) return json
+        val arrayStart = json.indexOf('[', keyIndex)
+        if (arrayStart == -1) return json
+
+        var depth = 0
+        for (i in arrayStart until json.length) {
+            when (json[i]) {
+                '[' -> depth++
+                ']' -> {
+                    depth--
+                    if (depth == 0) return json.substring(arrayStart, i + 1)
+                }
+            }
+        }
+        return json
     }
 
     /**
@@ -515,6 +664,62 @@ class AnimeUnityScraper {
                 .replace("\\t", "\t")
                 .replace("\\\\", "\\")
         }
+    }
+
+    /**
+     * Extracts a string value for [key] that lives at the TOP LEVEL (depth 1) of the JSON object,
+     * ignoring identical keys nested inside arrays/sub-objects (e.g. related-anime entries).
+     * Returns null if the key is absent or its value is not a string (e.g. null/number).
+     */
+    fun extractTopLevelJsonString(json: String, key: String): String? {
+        val target = "\"$key\""
+        var i = 0
+        var depth = 0
+        while (i < json.length) {
+            when (json[i]) {
+                '{', '[' -> { depth++; i++ }
+                '}', ']' -> { depth--; i++ }
+                '"' -> {
+                    if (depth == 1 && json.startsWith(target, i)) {
+                        var j = i + target.length
+                        while (j < json.length && json[j].isWhitespace()) j++
+                        if (j < json.length && json[j] == ':') {
+                            j++
+                            while (j < json.length && json[j].isWhitespace()) j++
+                            if (j < json.length && json[j] == '"') {
+                                val sb = StringBuilder()
+                                j++
+                                while (j < json.length) {
+                                    val ch = json[j]
+                                    if (ch == '\\' && j + 1 < json.length) {
+                                        sb.append(ch).append(json[j + 1]); j += 2; continue
+                                    }
+                                    if (ch == '"') break
+                                    sb.append(ch); j++
+                                }
+                                return sb.toString()
+                                    .replace("\\/", "/")
+                                    .replace("\\\"", "\"")
+                                    .replace("\\n", "\n")
+                                    .replace("\\t", "\t")
+                                    .replace("\\\\", "\\")
+                            }
+                            // top-level key present but value is null/number/etc → no string value
+                            return null
+                        }
+                    }
+                    // skip the rest of this string token so its content doesn't affect depth
+                    i++
+                    while (i < json.length) {
+                        if (json[i] == '\\') { i += 2; continue }
+                        if (json[i] == '"') { i++; break }
+                        i++
+                    }
+                }
+                else -> i++
+            }
+        }
+        return null
     }
 
     /**

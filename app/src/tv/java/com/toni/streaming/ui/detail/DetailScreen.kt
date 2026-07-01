@@ -4,6 +4,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +26,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -45,17 +49,22 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.foundation.lazy.grid.TvGridCells
+import androidx.tv.foundation.lazy.grid.TvGridItemSpan
 import androidx.tv.foundation.lazy.grid.TvLazyVerticalGrid
 import androidx.tv.foundation.lazy.grid.items
+import androidx.tv.foundation.lazy.list.TvLazyRow
+import androidx.tv.foundation.lazy.list.items as listItems
 import androidx.tv.material3.Button
 import androidx.tv.material3.ButtonDefaults
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Icon
 import androidx.tv.material3.IconButton
+import androidx.tv.material3.IconButtonDefaults
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import com.toni.streaming.data.model.Episode
+import com.toni.streaming.data.model.RelatedAnime
 import com.toni.streaming.data.repository.AnimeRepository
 import com.toni.streaming.ui.components.ErrorDisplay
 import com.toni.streaming.ui.components.LoadingIndicator
@@ -75,7 +84,8 @@ fun DetailScreen(
     repository: AnimeRepository,
     onEpisodeClick: (Episode) -> Unit,
     onBack: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onRelatedClick: (RelatedAnime) -> Unit = {}
 ) {
     val viewModel = remember { DetailViewModel(repository, animeUrl, animeId) }
     val uiState by viewModel.uiState.collectAsState()
@@ -120,12 +130,17 @@ fun DetailScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             IconButton(
-                                onClick = onBack
+                                onClick = onBack,
+                                colors = IconButtonDefaults.colors(
+                                    containerColor = Color.Transparent,
+                                    contentColor = AccentPurple,
+                                    focusedContainerColor = AccentPurple,
+                                    focusedContentColor = Color.White
+                                )
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.ArrowBack,
-                                    contentDescription = "Indietro",
-                                    tint = TextPrimary
+                                    contentDescription = "Indietro"
                                 )
                             }
                             Spacer(modifier = Modifier.width(16.dp))
@@ -160,17 +175,47 @@ fun DetailScreen(
 
                         Spacer(modifier = Modifier.height(16.dp))
 
-                        // Anime Title
-                        Text(
-                            text = details.title,
-                            style = MaterialTheme.typography.titleLarge.copy(
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 20.sp
-                            ),
-                            color = TextPrimary,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        // Anime Title + favorite (heart) toggle
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = details.title,
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 20.sp
+                                ),
+                                color = TextPrimary,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (details.score > 0f) {
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "★ ${String.format("%.1f", details.score)}",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = Color(0xFFFFC107),
+                                    maxLines = 1
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            IconButton(
+                                onClick = { viewModel.toggleFavorite() },
+                                colors = IconButtonDefaults.colors(
+                                    containerColor = Color.Transparent,
+                                    contentColor = if (uiState.isFavorite) AccentPurple else TextSecondary,
+                                    focusedContainerColor = AccentPurple,
+                                    focusedContentColor = Color.White
+                                )
+                            ) {
+                                Icon(
+                                    imageVector = if (uiState.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                    contentDescription = if (uiState.isFavorite) "Rimuovi dai preferiti" else "Aggiungi ai preferiti"
+                                )
+                            }
+                        }
 
                         Spacer(modifier = Modifier.height(8.dp))
 
@@ -199,6 +244,28 @@ fun DetailScreen(
                             .weight(0.65f)
                             .fillMaxHeight()
                     ) {
+                        // Related seasons / movies (chronological)
+                        if (details.related.isNotEmpty()) {
+                            Text(
+                                text = "Stagioni e film correlati",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = TextPrimary,
+                                modifier = Modifier.padding(bottom = 12.dp)
+                            )
+                            TvLazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                contentPadding = PaddingValues(end = 16.dp),
+                                modifier = Modifier.padding(bottom = 20.dp)
+                            ) {
+                                listItems(
+                                    items = details.related,
+                                    key = { it.id }
+                                ) { related ->
+                                    RelatedCard(related = related, onClick = { onRelatedClick(related) })
+                                }
+                            }
+                        }
+
                         // Title for episodes list
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -211,7 +278,11 @@ fun DetailScreen(
                             )
                             Spacer(modifier = Modifier.width(12.dp))
                             Text(
-                                text = "(${uiState.episodes.size})",
+                                text = if (uiState.canLoadMore) {
+                                    "(${uiState.episodes.size}/${uiState.totalEpisodes})"
+                                } else {
+                                    "(${uiState.episodes.size})"
+                                },
                                 style = MaterialTheme.typography.titleMedium,
                                 color = TextSecondary
                             )
@@ -236,6 +307,19 @@ fun DetailScreen(
                                         episodeWithProgress = episodeWithProgress,
                                         onClick = { onEpisodeClick(episodeWithProgress.episode) }
                                     )
+                                }
+
+                                // Footer: "load more" button spanning the full grid width
+                                if (uiState.canLoadMore) {
+                                    item(span = { TvGridItemSpan(maxLineSpan) }) {
+                                        LoadMoreButton(
+                                            isLoading = uiState.isLoadingMore,
+                                            rangeStart = uiState.nextRangeStart,
+                                            rangeEnd = uiState.nextRangeEnd,
+                                            total = uiState.totalEpisodes,
+                                            onClick = { viewModel.loadMoreEpisodes() }
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -375,6 +459,102 @@ private fun EpisodeCard(
                 )
             }
         }
+    }
+}
+
+/**
+ * A focusable card for a related season/movie in the horizontal row.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun RelatedCard(
+    related: RelatedAnime,
+    onClick: () -> Unit
+) {
+    var isFocused by remember { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .width(120.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (isFocused) AccentPurple.copy(alpha = 0.25f) else Color.Transparent)
+            .onFocusChanged { isFocused = it.isFocused }
+            .clickable(onClick = onClick)
+            .padding(6.dp)
+    ) {
+        AsyncImage(
+            model = related.imageUrl,
+            contentDescription = related.title,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(0.7f)
+                .clip(RoundedCornerShape(8.dp))
+                .border(
+                    width = if (isFocused) 2.dp else 0.dp,
+                    color = if (isFocused) AccentPurple else Color.Transparent,
+                    shape = RoundedCornerShape(8.dp)
+                )
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = related.title,
+            style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
+            color = if (isFocused) Color.White else TextPrimary,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (related.info.isNotBlank()) {
+            Text(
+                text = related.info,
+                style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp),
+                color = TextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+/**
+ * Full-width button shown at the end of the episode grid to lazily load the next page.
+ */
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun LoadMoreButton(
+    isLoading: Boolean,
+    rangeStart: Int,
+    rangeEnd: Int,
+    total: Int,
+    onClick: () -> Unit
+) {
+    var isFocused by remember { mutableStateOf(false) }
+    Button(
+        onClick = onClick,
+        enabled = !isLoading,
+        colors = ButtonDefaults.colors(
+            containerColor = DarkSurfaceVariant.copy(alpha = 0.6f),
+            contentColor = AccentPurple,
+            focusedContainerColor = AccentPurple,
+            focusedContentColor = Color.White
+        ),
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(64.dp)
+            .onFocusChanged { isFocused = it.isFocused },
+        shape = ButtonDefaults.shape(RoundedCornerShape(12.dp))
+    ) {
+        Text(
+            text = if (isLoading) {
+                "Caricamento…"
+            } else {
+                "Carica altri episodi  ($rangeStart–$rangeEnd di $total)"
+            },
+            style = MaterialTheme.typography.titleMedium.copy(
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp
+            ),
+            color = if (isFocused) Color.White else AccentPurple
+        )
     }
 }
 

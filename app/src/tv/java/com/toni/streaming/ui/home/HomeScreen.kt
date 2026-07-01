@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -45,6 +46,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -90,8 +92,17 @@ fun HomeScreen(
     val uiState by viewModel.uiState.collectAsState()
     val keyboardController = LocalSoftwareKeyboardController.current
 
-    // State to manage whether the virtual keyboard should open on TV
-    var isKeyboardActive by remember { mutableStateOf(false) }
+    // The search field stays read-only (so the IME does NOT auto-open on focus); pressing OK
+    // makes it editable and opens the keyboard. The actual show() runs in a LaunchedEffect after
+    // the field becomes editable, otherwise the IME-show request races the recomposition on TV.
+    var keyboardActive by remember { mutableStateOf(false) }
+
+    LaunchedEffect(keyboardActive) {
+        if (keyboardActive) {
+            kotlinx.coroutines.delay(60)
+            keyboardController?.show()
+        }
+    }
 
     Box(
         modifier = modifier
@@ -127,7 +138,7 @@ fun HomeScreen(
                 TextField(
                     value = uiState.searchQuery,
                     onValueChange = { viewModel.updateSearchQuery(it) },
-                    readOnly = !isKeyboardActive, // Block automatic keyboard opening on focus
+                    readOnly = !keyboardActive, // don't auto-open the IME on focus; open on OK
                     placeholder = {
                         androidx.compose.material3.Text(
                             text = "Cerca anime…",
@@ -147,7 +158,7 @@ fun HomeScreen(
                         if (uiState.searchQuery.isNotEmpty()) {
                             IconButton(onClick = {
                                 viewModel.clearSearch()
-                                isKeyboardActive = false
+                                keyboardActive = false
                                 keyboardController?.hide()
                             }) {
                                 Icon(
@@ -161,9 +172,9 @@ fun HomeScreen(
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                     keyboardActions = KeyboardActions(
-                        onSearch = { 
-                            isKeyboardActive = false
-                            keyboardController?.hide() 
+                        onSearch = {
+                            keyboardActive = false
+                            keyboardController?.hide()
                         }
                     ),
                     colors = TextFieldDefaults.colors(
@@ -179,19 +190,21 @@ fun HomeScreen(
                     modifier = Modifier
                         .width(320.dp)
                         .onFocusChanged { focusState ->
-                            // Automatically deactivate keyboard mode if focus leaves the search field
+                            // Leaving the field resets it to read-only and hides the keyboard.
                             if (!focusState.isFocused) {
-                                isKeyboardActive = false
+                                keyboardActive = false
                                 keyboardController?.hide()
                             }
                         }
-                        .onKeyEvent { keyEvent ->
-                            // Open keyboard ONLY if user presses OK/Select on the D-Pad
-                            if (keyEvent.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
-                                keyEvent.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_ENTER) {
-                                if (keyEvent.nativeKeyEvent.action == android.view.KeyEvent.ACTION_DOWN) {
-                                    isKeyboardActive = true
-                                    keyboardController?.show()
+                        .onPreviewKeyEvent { keyEvent ->
+                            // Intercept OK/Select BEFORE the TextField consumes it as a click,
+                            // so pressing OK on the focused field opens the keyboard.
+                            val code = keyEvent.nativeKeyEvent.keyCode
+                            if (code == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
+                                code == android.view.KeyEvent.KEYCODE_ENTER
+                            ) {
+                                if (keyEvent.nativeKeyEvent.action == android.view.KeyEvent.ACTION_DOWN && !keyboardActive) {
+                                    keyboardActive = true
                                 }
                                 true
                             } else {
@@ -378,12 +391,50 @@ fun HomeScreen(
                                             }
                                         }
 
+                                        // 2b. ===== FAVORITES ROW =====
+                                        if (uiState.favoritesList.isNotEmpty()) {
+                                            item {
+                                                Column {
+                                                    Text(
+                                                        text = "Preferiti",
+                                                        style = MaterialTheme.typography.headlineSmall.copy(
+                                                            fontWeight = FontWeight.Bold,
+                                                            fontSize = 20.sp
+                                                        ),
+                                                        color = TextPrimary,
+                                                        modifier = Modifier.padding(start = 48.dp, bottom = 12.dp)
+                                                    )
+                                                    TvLazyRow(
+                                                        contentPadding = PaddingValues(start = 48.dp, end = 48.dp, top = 12.dp, bottom = 12.dp),
+                                                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                                                        modifier = Modifier.fillMaxWidth().height(330.dp)
+                                                    ) {
+                                                        items(
+                                                            items = uiState.favoritesList,
+                                                            key = { "fav_${it.animeId}" }
+                                                        ) { fav ->
+                                                            val anime = Anime(
+                                                                id = fav.animeId,
+                                                                title = fav.title,
+                                                                imageUrl = fav.imageUrl,
+                                                                episodeUrl = fav.animeUrl
+                                                            )
+                                                            AnimeCard(
+                                                                anime = anime,
+                                                                onClick = { onAnimeClick(anime) }
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
                                         // 3. ===== POPULAR CATALOG ROW (popularList - popular=true) =====
                                         if (uiState.popularList.isNotEmpty()) {
                                             item {
                                                 Column {
                                                     Text(
-                                                        text = "Piu popolari",
+                                                        text = "Più popolari",
                                                         style = MaterialTheme.typography.headlineSmall.copy(
                                                             fontWeight = FontWeight.Bold,
                                                             fontSize = 20.sp
@@ -415,7 +466,7 @@ fun HomeScreen(
                                             item {
                                                 Column {
                                                     Text(
-                                                        text = "Piu visti",
+                                                        text = "Più visti",
                                                         style = MaterialTheme.typography.headlineSmall.copy(
                                                             fontWeight = FontWeight.Bold,
                                                             fontSize = 20.sp
@@ -509,17 +560,30 @@ private fun HeroFeaturedBanner(
                     .fillMaxSize()
                     .clip(RoundedCornerShape(20.dp))
             ) {
-                // Background Image (Cover art aligned right, faded to black on the left, scales internally)
-                AsyncImage(
-                    model = anime.imageUrl,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .fillMaxWidth(0.6f)
-                        .fillMaxHeight()
-                        .align(Alignment.CenterEnd)
-                        .scale(scale) // Image scales internally
-                )
+                // Prefer the wide banner (imageurl_cover), full-bleed. If absent, show the
+                // portrait cover on the right (faded to black on the left) as before.
+                val banner = anime.coverUrl?.takeIf { it.isNotBlank() }
+                if (banner != null) {
+                    AsyncImage(
+                        model = banner,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .scale(scale)
+                    )
+                } else {
+                    AsyncImage(
+                        model = anime.imageUrl,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxWidth(0.6f)
+                            .fillMaxHeight()
+                            .align(Alignment.CenterEnd)
+                            .scale(scale)
+                    )
+                }
 
                 // Dynamic dark gradient to overlay text cleanly on the left
                 Box(

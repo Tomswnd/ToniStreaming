@@ -50,6 +50,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
@@ -81,9 +84,10 @@ fun PlayerScreen(
     episodeUrl: String,
     repository: AnimeRepository,
     onBack: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    episodeNumber: Int = 0
 ) {
-    val viewModel = remember { PlayerViewModel(repository, animeId, episodeId, episodeUrl) }
+    val viewModel = remember { PlayerViewModel(repository, animeId, episodeId, episodeUrl, episodeNumber) }
     val uiState by viewModel.uiState.collectAsState()
 
     // Register BackHandler to cleanly pop back stack on system back button press
@@ -215,6 +219,19 @@ private fun VideoPlayer(
                 isNearEnd = remainingMs < 30_000
             }
         }
+    }
+
+    // Pause playback when the app goes to the background, so audio/video does not keep
+    // running off-screen. Playback stays paused until the user resumes it manually.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, exoPlayer) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                exoPlayer.pause()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // Save final watch progress and release the player when leaving the screen

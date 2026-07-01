@@ -61,10 +61,15 @@ fun AppNavigation(
                 onEpisodeClick = { episode ->
                     val encodedUrl = URLEncoder.encode(episode.url, "UTF-8")
                     navController.navigate(
-                        Screen.Player.createRoute(episode.animeId, episode.id, encodedUrl)
+                        Screen.Player.createRoute(episode.animeId, episode.id, episode.number, encodedUrl)
                     )
                 },
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                onRelatedClick = { related ->
+                    navController.navigate(
+                        Screen.Detail.createRoute(related.id, related.url)
+                    )
+                }
             )
         }
 
@@ -73,11 +78,13 @@ fun AppNavigation(
             arguments = listOf(
                 navArgument("animeId") { type = NavType.StringType },
                 navArgument("episodeId") { type = NavType.StringType },
+                navArgument("episodeNumber") { type = NavType.IntType },
                 navArgument("episodeUrl") { type = NavType.StringType }
             )
         ) { backStackEntry ->
             val animeId = backStackEntry.arguments?.getString("animeId") ?: ""
             val episodeId = backStackEntry.arguments?.getString("episodeId") ?: ""
+            val episodeNumber = backStackEntry.arguments?.getInt("episodeNumber") ?: 0
             val episodeUrl = URLDecoder.decode(
                 backStackEntry.arguments?.getString("episodeUrl") ?: "", "UTF-8"
             )
@@ -86,7 +93,8 @@ fun AppNavigation(
                 episodeId = episodeId,
                 episodeUrl = episodeUrl,
                 repository = repository,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                episodeNumber = episodeNumber
             )
         }
     }

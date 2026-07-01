@@ -10,9 +10,9 @@ sealed class Screen(val route: String) {
             return "detail/${animeId}/${java.net.URLEncoder.encode(animeUrl, "UTF-8")}"
         }
     }
-    data object Player : Screen("player/{animeId}/{episodeId}/{episodeUrl}") {
-        fun createRoute(animeId: String, episodeId: String, episodeUrl: String): String {
-            return "player/${animeId}/${episodeId}/${java.net.URLEncoder.encode(episodeUrl, "UTF-8")}"
+    data object Player : Screen("player/{animeId}/{episodeId}/{episodeNumber}/{episodeUrl}") {
+        fun createRoute(animeId: String, episodeId: String, episodeNumber: Int, episodeUrl: String): String {
+            return "player/${animeId}/${episodeId}/${episodeNumber}/${java.net.URLEncoder.encode(episodeUrl, "UTF-8")}"
         }
     }
 }

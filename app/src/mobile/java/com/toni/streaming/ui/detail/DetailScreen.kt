@@ -17,11 +17,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Button
@@ -48,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.toni.streaming.data.model.Episode
+import com.toni.streaming.data.model.RelatedAnime
 import com.toni.streaming.data.repository.AnimeRepository
 import com.toni.streaming.ui.components.ErrorDisplay
 import com.toni.streaming.ui.components.LoadingIndicator
@@ -67,7 +71,8 @@ fun DetailScreen(
     repository: AnimeRepository,
     onEpisodeClick: (Episode) -> Unit,
     onBack: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onRelatedClick: (RelatedAnime) -> Unit = {}
 ) {
     val viewModel = remember { DetailViewModel(repository, animeUrl, animeId) }
     val uiState by viewModel.uiState.collectAsState()
@@ -101,8 +106,10 @@ fun DetailScreen(
                                 .fillMaxWidth()
                                 .height(260.dp)
                         ) {
+                            // Prefer the wide banner for this backdrop; fall back to the
+                            // portrait cover only if no banner is available.
                             AsyncImage(
-                                model = details.imageUrl,
+                                model = details.coverUrl?.ifBlank { null } ?: details.imageUrl,
                                 contentDescription = details.title,
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize()
@@ -148,11 +155,33 @@ fun DetailScreen(
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp)
                         ) {
-                            Text(
-                                text = details.title,
-                                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.ExtraBold),
-                                color = TextPrimary
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = details.title,
+                                    style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.ExtraBold),
+                                    color = TextPrimary,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (details.score > 0f) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "★ ${String.format("%.1f", details.score)}",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = Color(0xFFFFC107),
+                                        maxLines = 1
+                                    )
+                                }
+                                IconButton(onClick = { viewModel.toggleFavorite() }) {
+                                    Icon(
+                                        imageVector = if (uiState.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                        contentDescription = if (uiState.isFavorite) "Rimuovi dai preferiti" else "Aggiungi ai preferiti",
+                                        tint = if (uiState.isFavorite) AccentPurple else TextSecondary
+                                    )
+                                }
+                            }
 
                             Spacer(modifier = Modifier.height(8.dp))
 
@@ -163,7 +192,11 @@ fun DetailScreen(
                                 horizontalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
                                 Text(
-                                    text = "${details.episodes.size} Episodi",
+                                    text = if (uiState.canLoadMore) {
+                                        "${uiState.episodes.size}/${uiState.totalEpisodes} Episodi"
+                                    } else {
+                                        "${uiState.episodes.size} Episodi"
+                                    },
                                     style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
                                     color = TextPrimary
                                 )
@@ -179,16 +212,40 @@ fun DetailScreen(
                                 lineHeight = 20.sp
                             )
 
-                            Spacer(modifier = Modifier.height(24.dp))
-
-                            Text(
-                                text = "Episodi",
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                                color = TextPrimary
-                            )
-
                             Spacer(modifier = Modifier.height(8.dp))
                         }
+                    }
+
+                    // 2b. ===== RELATED SEASONS / MOVIES (chronological) =====
+                    if (details.related.isNotEmpty()) {
+                        item(key = "related_section") {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    text = "Stagioni e film correlati",
+                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = TextPrimary,
+                                    modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 12.dp)
+                                )
+                                LazyRow(
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    contentPadding = PaddingValues(horizontal = 16.dp)
+                                ) {
+                                    items(items = details.related, key = { it.id }) { related ->
+                                        RelatedCard(related = related, onClick = { onRelatedClick(related) })
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 2c. ===== EPISODES HEADER =====
+                    item(key = "episodes_header") {
+                        Text(
+                            text = "Episodi",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = TextPrimary,
+                            modifier = Modifier.padding(start = 16.dp, top = 20.dp, bottom = 8.dp)
+                        )
                     }
 
                     // 3. ===== EPISODES VERTICAL TOUCH LIST =====
@@ -201,8 +258,80 @@ fun DetailScreen(
                             onClick = { onEpisodeClick(epProgress.episode) }
                         )
                     }
+
+                    // 4. ===== LOAD MORE BUTTON =====
+                    if (uiState.canLoadMore) {
+                        item(key = "load_more") {
+                            Button(
+                                onClick = { viewModel.loadMoreEpisodes() },
+                                enabled = !uiState.isLoadingMore,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = AccentPurple,
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                                    .height(52.dp)
+                            ) {
+                                Text(
+                                    text = if (uiState.isLoadingMore) {
+                                        "Caricamento…"
+                                    } else {
+                                        "Carica altri  (${uiState.nextRangeStart}–${uiState.nextRangeEnd} di ${uiState.totalEpisodes})"
+                                    },
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                )
+                            }
+                        }
+                    }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Compact poster card for a related season/movie in the horizontal row.
+ */
+@Composable
+private fun RelatedCard(
+    related: RelatedAnime,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .width(110.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(4.dp)
+    ) {
+        AsyncImage(
+            model = related.imageUrl,
+            contentDescription = related.title,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(0.7f)
+                .clip(RoundedCornerShape(8.dp))
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = related.title,
+            style = MaterialTheme.typography.bodySmall,
+            color = TextPrimary,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (related.info.isNotBlank()) {
+            Text(
+                text = related.info,
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }

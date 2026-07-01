@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -327,12 +328,49 @@ fun HomeScreen(
                                         }
                                     }
 
+                                    // 2b. ===== FAVORITES ROW =====
+                                    if (uiState.favoritesList.isNotEmpty()) {
+                                        item {
+                                            Column {
+                                                Text(
+                                                    text = "Preferiti",
+                                                    style = MaterialTheme.typography.titleMedium.copy(
+                                                        fontWeight = FontWeight.Bold
+                                                    ),
+                                                    color = TextPrimary,
+                                                    modifier = Modifier.padding(start = 16.dp, bottom = 8.dp)
+                                                )
+                                                LazyRow(
+                                                    contentPadding = PaddingValues(horizontal = 16.dp),
+                                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                                    modifier = Modifier.fillMaxWidth()
+                                                ) {
+                                                    items(
+                                                        items = uiState.favoritesList,
+                                                        key = { "fav_${it.animeId}" }
+                                                    ) { fav ->
+                                                        val anime = Anime(
+                                                            id = fav.animeId,
+                                                            title = fav.title,
+                                                            imageUrl = fav.imageUrl,
+                                                            episodeUrl = fav.animeUrl
+                                                        )
+                                                        AnimeCard(
+                                                            anime = anime,
+                                                            onClick = { onAnimeClick(anime) }
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     // 3. ===== POPULAR CATALOG ROW (popularList - popular=true) =====
                                     if (uiState.popularList.isNotEmpty()) {
                                         item {
                                             Column {
                                                 Text(
-                                                    text = "Piu popolari",
+                                                    text = "Più popolari",
                                                     style = MaterialTheme.typography.titleMedium.copy(
                                                         fontWeight = FontWeight.Bold
                                                     ),
@@ -363,7 +401,7 @@ fun HomeScreen(
                                         item {
                                             Column {
                                                 Text(
-                                                    text = "Piu visti",
+                                                    text = "Più visti",
                                                     style = MaterialTheme.typography.titleMedium.copy(
                                                         fontWeight = FontWeight.Bold
                                                     ),
@@ -415,16 +453,29 @@ private fun MobileHeroBanner(
         colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            // Background Image
-            AsyncImage(
-                model = anime.imageUrl,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .fillMaxWidth(0.55f)
-                    .fillMaxHeight()
-                    .align(Alignment.CenterEnd)
-            )
+            // Prefer the wide banner (imageurl_cover). If the anime has no banner, show the
+            // portrait cover as a small poster on the right (not stretched full-bleed).
+            val banner = anime.coverUrl?.takeIf { it.isNotBlank() }
+            if (banner != null) {
+                AsyncImage(
+                    model = banner,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                AsyncImage(
+                    model = anime.imageUrl,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .aspectRatio(0.7f) // small portrait poster
+                        .align(Alignment.CenterEnd)
+                        .padding(10.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                )
+            }
 
             // Dark fade gradient overlay
             Box(

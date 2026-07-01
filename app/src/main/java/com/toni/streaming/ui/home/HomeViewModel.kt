@@ -2,6 +2,7 @@ package com.toni.streaming.ui.home
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.toni.streaming.data.local.FavoriteEntity
 import com.toni.streaming.data.local.WatchHistoryEntity
 import com.toni.streaming.data.model.Anime
 import com.toni.streaming.data.repository.AnimeRepository
@@ -11,6 +12,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
@@ -25,6 +27,7 @@ data class HomeUiState(
     val mostViewedList: List<Anime> = emptyList(),
     val searchResults: List<Anime> = emptyList(),
     val continueWatchingList: List<WatchHistoryEntity> = emptyList(),
+    val favoritesList: List<FavoriteEntity> = emptyList(),
     val isLoading: Boolean = true,
     val isSearching: Boolean = false,
     val error: String? = null,
@@ -44,33 +47,41 @@ class HomeViewModel(
         loadAnimeList()
         observeSearch()
         observeWatchHistory()
+        observeFavorites()
+    }
+
+    private fun observeFavorites() {
+        viewModelScope.launch {
+            repository.getFavorites().collect { favorites ->
+                _uiState.update { it.copy(favoritesList = favorites) }
+                recomputeFeatured()
+            }
+        }
     }
 
     fun loadAnimeList() {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
 
-            // Fetch the three top-anime sections in parallel using async coroutines
-            val featuredDeferred = async { repository.getTopAnimeList(TopAnimeType.IN_PROGRESS) }
+            // Sources for the "In evidenza" mix + the catalog rows, fetched in parallel.
             val popularDeferred = async { repository.getTopAnimeList(TopAnimeType.POPULAR) }
             val mostViewedDeferred = async { repository.getTopAnimeList(TopAnimeType.MOST_VIEWED) }
 
-            val featuredResult = featuredDeferred.await()
             val popularResult = popularDeferred.await()
             val mostViewedResult = mostViewedDeferred.await()
 
-            if (featuredResult.isSuccess || popularResult.isSuccess || mostViewedResult.isSuccess) {
+            if (popularResult.isSuccess || mostViewedResult.isSuccess) {
                 _uiState.update { state ->
                     state.copy(
-                        featuredList = featuredResult.getOrDefault(emptyList()),
                         popularList = popularResult.getOrDefault(emptyList()),
                         mostViewedList = mostViewedResult.getOrDefault(emptyList()),
                         isLoading = false
                     )
                 }
+                recomputeFeatured()
             } else {
-                val errorMsg = mostViewedResult.exceptionOrNull()?.message 
-                    ?: popularResult.exceptionOrNull()?.message 
+                val errorMsg = mostViewedResult.exceptionOrNull()?.message
+                    ?: popularResult.exceptionOrNull()?.message
                     ?: "Errore nel caricamento dei dati"
                 _uiState.update {
                     it.copy(
@@ -80,6 +91,32 @@ class HomeViewModel(
                 }
             }
         }
+    }
+
+    /**
+     * Builds the "In evidenza" carousel: a personalized, shuffled mix. The user's favorites
+     * lead the row, followed by a shuffled blend of popular + most-viewed titles that have a
+     * wide banner. Reshuffled on every rebuild so the hero rotates.
+     */
+    private fun recomputeFeatured() {
+        val state = _uiState.value
+        val favorites = state.favoritesList.map { fav ->
+            Anime(
+                id = fav.animeId,
+                title = fav.title,
+                imageUrl = fav.imageUrl,
+                coverUrl = fav.coverUrl,
+                episodeUrl = fav.animeUrl
+            )
+        }
+        val trending = (state.popularList + state.mostViewedList)
+            .filter { !it.coverUrl.isNullOrBlank() }
+
+        val featured = (favorites.shuffled() + trending.shuffled())
+            .distinctBy { it.id }
+            .take(8)
+
+        _uiState.update { it.copy(featuredList = featured) }
     }
 
     fun updateSearchQuery(query: String) {

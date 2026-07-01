@@ -3,6 +3,7 @@ package com.toni.streaming.data.repository
 import android.content.Context
 import android.util.Log
 import com.toni.streaming.data.local.AppDatabase
+import com.toni.streaming.data.local.FavoriteEntity
 import com.toni.streaming.data.local.WatchHistoryEntity
 import com.toni.streaming.data.model.Anime
 import com.toni.streaming.data.model.AnimeDetails
@@ -33,6 +34,7 @@ class AnimeRepository(
     private val cloudflareBypass = CloudflareBypass(context)
     private val database = AppDatabase.getInstance(context)
     private val watchHistoryDao = database.watchHistoryDao()
+    private val favoriteDao = database.favoriteDao()
 
     private var cfCookiesObtained = false
     private var bypassAttempted = false
@@ -72,11 +74,25 @@ class AnimeRepository(
     }
 
     /**
-     * Fetches detailed information including metadata and episodes.
+     * Fetches detailed information including metadata and the first page of episodes.
      */
     suspend fun getAnimeDetails(animeUrl: String, animeId: String): Result<AnimeDetails> {
         return executeWithCfRetry("getAnimeDetails(id=$animeId)") {
             scraper.getAnimeDetails(animeUrl, animeId)
+        }
+    }
+
+    /**
+     * Lazily fetches a further page of episodes (by episode number) on demand.
+     */
+    suspend fun getEpisodesRange(
+        animeId: String,
+        animeUrl: String,
+        start: Int,
+        end: Int
+    ): Result<List<Episode>> {
+        return executeWithCfRetry("getEpisodesRange(id=$animeId, $start-$end)") {
+            scraper.getEpisodesRange(animeId, animeUrl, start, end)
         }
     }
 
@@ -174,6 +190,37 @@ class AnimeRepository(
 
     fun getRecentlyWatched(): Flow<List<WatchHistoryEntity>> {
         return watchHistoryDao.getRecentlyWatched()
+    }
+
+    // --- Favorites ---
+
+    fun getFavorites(): Flow<List<FavoriteEntity>> = favoriteDao.getAll()
+
+    fun isFavorite(animeId: String): Flow<Boolean> = favoriteDao.isFavorite(animeId)
+
+    /** Toggles favorite state; returns the new state (true = now favorite). */
+    suspend fun toggleFavorite(
+        animeId: String,
+        title: String,
+        imageUrl: String,
+        animeUrl: String,
+        coverUrl: String? = null
+    ): Boolean {
+        return if (favoriteDao.isFavoriteNow(animeId)) {
+            favoriteDao.delete(animeId)
+            false
+        } else {
+            favoriteDao.upsert(
+                FavoriteEntity(
+                    animeId = animeId,
+                    title = title,
+                    imageUrl = imageUrl,
+                    animeUrl = animeUrl,
+                    coverUrl = coverUrl
+                )
+            )
+            true
+        }
     }
 
     // --- Private helpers ---
