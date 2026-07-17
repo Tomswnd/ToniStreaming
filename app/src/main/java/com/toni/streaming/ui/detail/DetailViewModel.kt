@@ -29,10 +29,17 @@ data class DetailUiState(
     val error: String? = null,
     val totalEpisodes: Int = 0,
     val isLoadingMore: Boolean = false,
-    val isFavorite: Boolean = false
+    val isFavorite: Boolean = false,
+    /** Set once a "load more" call returns nothing, to stop offering a dead button. */
+    val reachedEnd: Boolean = false
 ) {
-    /** True when there are further episodes that can be lazily loaded. */
-    val canLoadMore: Boolean get() = episodes.size < totalEpisodes
+    /**
+     * Only offer "load more" when the first embedded page is full (~120): a shorter first page
+     * means the site already returned every episode, so there is nothing more to fetch even if
+     * episodes_count claims a higher number (e.g. count says 25 but only 24 exist).
+     */
+    val canLoadMore: Boolean
+        get() = !reachedEnd && episodes.size >= PAGE_SIZE && episodes.size < totalEpisodes
     /** Episode number range that the "load more" action will fetch next. */
     val nextRangeStart: Int get() = (episodes.maxOfOrNull { it.episode.number } ?: episodes.size) + 1
     val nextRangeEnd: Int get() = minOf(nextRangeStart + PAGE_SIZE - 1, totalEpisodes)
@@ -140,7 +147,12 @@ class DetailViewModel(
                         val merged = (current.episodes + appended)
                             .sortedBy { it.episode.number }
 
-                        current.copy(episodes = merged, isLoadingMore = false)
+                        current.copy(
+                            episodes = merged,
+                            isLoadingMore = false,
+                            // Nothing new came back -> stop offering the button (count was over-reported).
+                            reachedEnd = appended.isEmpty()
+                        )
                     }
                 },
                 onFailure = { error ->

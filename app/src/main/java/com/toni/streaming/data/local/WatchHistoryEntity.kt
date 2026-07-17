@@ -8,6 +8,7 @@ data class WatchHistoryEntity(
     @PrimaryKey
     val episodeId: String,
     val animeId: String,
+    val episodeNumber: Int = 0,
     val watchedPositionMs: Long = 0,
     val totalDurationMs: Long = 0,
     val lastWatchedTimestamp: Long = System.currentTimeMillis(),

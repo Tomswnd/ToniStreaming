@@ -42,6 +42,7 @@ class HomeViewModel(
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
     private val _searchQuery = MutableStateFlow("")
+    private val fetchedSynopsisIds = mutableSetOf<String>()
 
     init {
         loadAnimeList()
@@ -117,6 +118,29 @@ class HomeViewModel(
             .take(8)
 
         _uiState.update { it.copy(featuredList = featured) }
+
+        // Fetch anime description (synopsis) in background for featured items that miss it
+        viewModelScope.launch {
+            featured.forEach { anime ->
+                if (anime.synopsis.isBlank() && !fetchedSynopsisIds.contains(anime.id)) {
+                    fetchedSynopsisIds.add(anime.id)
+                    repository.getAnimeDetails(anime.episodeUrl, anime.id).onSuccess { details ->
+                        if (details.plot.isNotBlank()) {
+                            _uiState.update { currentState ->
+                                val updatedList = currentState.featuredList.map { item ->
+                                    if (item.id == anime.id) {
+                                        item.copy(synopsis = details.plot)
+                                    } else {
+                                        item
+                                    }
+                                }
+                                currentState.copy(featuredList = updatedList)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fun updateSearchQuery(query: String) {
@@ -156,16 +180,20 @@ class HomeViewModel(
     private fun observeWatchHistory() {
         viewModelScope.launch {
             repository.getRecentlyWatched().collect { historyList ->
-                // Keep the most recent 10 in-progress items
                 val inProgressItems = historyList
                     .filter { entity ->
-                        val isFinished = entity.totalDurationMs > 0 && 
-                            (entity.totalDurationMs - entity.watchedPositionMs < 15_000 || 
+                        val isFinished = entity.totalDurationMs > 0 &&
+                            (entity.totalDurationMs - entity.watchedPositionMs < 15_000 ||
                              entity.watchedPositionMs * 100 / entity.totalDurationMs > 80)
                         !isFinished
                     }
+                    // Show a single row per anime: the started episode with the highest number.
+                    .groupBy { it.animeId }
+                    .map { (_, entries) -> entries.maxByOrNull { it.episodeNumber } ?: entries.first() }
+                    // Most recently watched anime first, then cap the row length.
+                    .sortedByDescending { it.lastWatchedTimestamp }
                     .take(10)
-                
+
                 _uiState.update { it.copy(continueWatchingList = inProgressItems) }
             }
         }

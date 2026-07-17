@@ -4,6 +4,8 @@
     <!-- Shared permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Helps mDNS/NSD discovery for local peer-to-peer sync -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <application
         android:name=".ToniApp"

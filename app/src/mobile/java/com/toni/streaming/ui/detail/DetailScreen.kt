@@ -39,17 +39,22 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import java.util.Locale
 import com.toni.streaming.data.model.Episode
 import com.toni.streaming.data.model.RelatedAnime
 import com.toni.streaming.data.repository.AnimeRepository
@@ -68,13 +73,16 @@ import com.toni.streaming.ui.theme.TextSecondary
 fun DetailScreen(
     animeUrl: String,
     animeId: String,
-    repository: AnimeRepository,
     onEpisodeClick: (Episode) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     onRelatedClick: (RelatedAnime) -> Unit = {}
 ) {
-    val viewModel = remember { DetailViewModel(repository, animeUrl, animeId) }
+    val context = LocalContext.current
+    val repository = remember { AnimeRepository.getInstance(context) }
+    val viewModel: DetailViewModel = viewModel(
+        factory = viewModelFactory { initializer { DetailViewModel(repository, animeUrl, animeId) } }
+    )
     val uiState by viewModel.uiState.collectAsState()
 
     Box(
@@ -168,7 +176,7 @@ fun DetailScreen(
                                 if (details.score > 0f) {
                                     Spacer(modifier = Modifier.width(8.dp))
                                     Text(
-                                        text = "★ ${String.format("%.1f", details.score)}",
+                                        text = "★ ${String.format(Locale.US, "%.1f", details.score)}",
                                         style = MaterialTheme.typography.titleMedium,
                                         color = Color(0xFFFFC107),
                                         maxLines = 1
@@ -386,10 +394,8 @@ private fun EpisodeRow(
                     )
 
                     if (isStarted && !isCompleted) {
-                        val progressMinutes = watchedPositionMs / 60_000
-                        val durationMinutes = totalDurationMs / 60_000
                         Text(
-                            text = "Arrivato a ${String.format("%02d:%02d", progressMinutes, (watchedPositionMs % 60000) / 1000)} / ${String.format("%02d:%02d", durationMinutes, (totalDurationMs % 60000) / 1000)}",
+                            text = "Arrivato a ${formatWatchTime(watchedPositionMs)} / ${formatWatchTime(totalDurationMs)}",
                             style = MaterialTheme.typography.bodySmall,
                             color = TextSecondary
                         )
@@ -416,5 +422,21 @@ private fun EpisodeRow(
                 }
             }
         }
+    }
+}
+
+/**
+ * Formats a millisecond position as m:ss, or h:mm:ss when the content is an hour or longer,
+ * so episodes over 60 minutes no longer show a broken "75:12".
+ */
+private fun formatWatchTime(ms: Long): String {
+    val totalSeconds = (ms / 1000).coerceAtLeast(0)
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+    return if (hours > 0) {
+        String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format(Locale.US, "%d:%02d", minutes, seconds)
     }
 }

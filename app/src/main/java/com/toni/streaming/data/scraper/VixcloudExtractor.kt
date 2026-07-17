@@ -30,18 +30,19 @@ class VixcloudExtractor(private val httpClient: OkHttpClient) {
             .header("Origin", AnimeUnityScraper.BASE_URL)
             .build()
 
-        val response = httpClient.newCall(request).execute()
-        val responseBody = response.body?.string() ?: throw ScrapingException.NetworkException(
-            RuntimeException("Empty response from Vixcloud embed")
-        )
-        response.close()
+        val responseBody = httpClient.newCall(request).execute().use { response ->
+            response.body?.string() ?: throw ScrapingException.NetworkException(
+                RuntimeException("Empty response from Vixcloud embed")
+            )
+        }
 
         // Search for the playlist URL using the new strategy
-        val m3u8Url = findPlaylistUrl(responseBody)
+        val playlist = findPlaylistUrl(responseBody)
             ?: throw ScrapingException.M3u8NotFoundException()
 
         StreamInfo(
-            m3u8Url = m3u8Url,
+            m3u8Url = playlist.url,
+            isHls = playlist.isHls,
             referer = embedUrl,
             userAgent = AnimeUnityScraper.USER_AGENT,
             headers = mapOf(
@@ -52,21 +53,33 @@ class VixcloudExtractor(private val httpClient: OkHttpClient) {
         )
     }
 
+    /** A resolved stream URL plus whether it is an adaptive HLS playlist (vs. a progressive MP4). */
+    private data class PlaylistResult(val url: String, val isHls: Boolean)
+
     /**
      * Tries multiple strategies to find the playlist or video URL in the Vixcloud response.
+     *
+     * HLS is preferred over the direct MP4: the HLS master playlist is adaptive, so ExoPlayer can
+     * pick a rendition the device's hardware decoder actually supports. Some TV boxes (e.g. certain
+     * MediaTek chips) cannot hardware-decode the full-resolution progressive MP4 and silently fall
+     * back to software decoding, which stutters and desyncs audio. The MP4 stays as a last resort.
      */
-    private fun findPlaylistUrl(body: String): String? {
-        // Strategy 1: Parse direct download URL (.mp4 - highly stable, bypasses Cloudflare)
-        parseDownloadUrl(body)?.let { return it }
+    private fun findPlaylistUrl(body: String): PlaylistResult? {
+        // Strategy 1: direct download MP4 — quality-labelled (…/720p.mp4), so the player can step
+        // down to a resolution the device can actually hardware-decode when the source is too big.
+        parseDownloadUrl(body)?.let { return PlaylistResult(it, isHls = false) }
 
-        // Strategy 2: Parse from window.masterPlaylist (HLS)
-        parseMasterPlaylist(body)?.let { return it }
+        // Strategy 2: window.masterPlaylist (adaptive HLS).
+        parseMasterPlaylist(body)?.let { return PlaylistResult(it, isHls = true) }
 
-        // Strategy 3: Direct .m3u8 URL or patterns containing .m3u8
-        findM3u8Url(body)?.let { return it }
+        // Strategy 3: a direct .m3u8 URL somewhere in the page.
+        findM3u8Url(body)?.let { return PlaylistResult(it, isHls = true) }
 
-        // Strategy 4: Parse from window.streams list (Fallback)
-        parseStreamsFallback(body)?.let { return it }
+        // Strategy 4: window.streams list fallback.
+        parseStreamsFallback(body)?.let {
+            val hls = it.contains(".m3u8", ignoreCase = true) || it.contains("/playlist/", ignoreCase = true)
+            return PlaylistResult(it, isHls = hls)
+        }
 
         return null
     }

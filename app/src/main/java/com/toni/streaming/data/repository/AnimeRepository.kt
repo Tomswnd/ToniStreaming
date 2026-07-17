@@ -14,25 +14,52 @@ import com.toni.streaming.data.scraper.CloudflareBypass
 import com.toni.streaming.data.scraper.ScrapingException
 import com.toni.streaming.data.scraper.TopAnimeType
 import com.toni.streaming.data.scraper.VixcloudExtractor
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Single source of truth for all anime data.
  * Coordinates between the scraper, extractor, Cloudflare bypass, and local database.
  */
-class AnimeRepository(
-    private val context: Context
+class AnimeRepository private constructor(
+    context: Context
 ) {
     companion object {
         private const val TAG = "AnimeRepository"
+
+        @Volatile
+        private var INSTANCE: AnimeRepository? = null
+
+        /**
+         * App-wide singleton. Backed by the application context, so a single [AnimeRepository]
+         * (and its OkHttp client / cookie jar / DB handles) is shared for the whole process
+         * instead of being rebuilt per screen.
+         */
+        fun getInstance(context: Context): AnimeRepository =
+            INSTANCE ?: synchronized(this) {
+                INSTANCE ?: AnimeRepository(context.applicationContext).also { INSTANCE = it }
+            }
     }
+
+    // Hold the application context only, never an Activity, to avoid leaking it via the
+    // long-lived scraper / Cloudflare WebView.
+    private val appContext = context.applicationContext
+
+    // Application-scoped IO scope for fire-and-forget writes (e.g. saving watch progress when the
+    // player screen is disposed and no ViewModel/composition scope is available).
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val scraper = AnimeUnityScraper()
     val httpClient: okhttp3.OkHttpClient
         get() = scraper.httpClient
     private val extractor = VixcloudExtractor(scraper.httpClient)
-    private val cloudflareBypass = CloudflareBypass(context)
-    private val database = AppDatabase.getInstance(context)
+    private val cloudflareBypass = CloudflareBypass(appContext)
+    private val database = AppDatabase.getInstance(appContext)
     private val watchHistoryDao = database.watchHistoryDao()
     private val favoriteDao = database.favoriteDao()
 
@@ -158,18 +185,20 @@ class AnimeRepository(
     // --- Watch History ---
 
     suspend fun saveWatchProgress(
-        episodeId: String, 
-        animeId: String, 
-        position: Long, 
+        episodeId: String,
+        animeId: String,
+        position: Long,
         duration: Long,
         animeTitle: String = "",
         animeImageUrl: String = "",
-        animeSlug: String = ""
+        animeSlug: String = "",
+        episodeNumber: Int = 0
     ) {
         watchHistoryDao.upsert(
             WatchHistoryEntity(
                 episodeId = episodeId,
                 animeId = animeId,
+                episodeNumber = episodeNumber,
                 watchedPositionMs = position,
                 totalDurationMs = duration,
                 lastWatchedTimestamp = System.currentTimeMillis(),
@@ -178,6 +207,29 @@ class AnimeRepository(
                 animeSlug = animeSlug
             )
         )
+    }
+
+    /**
+     * Fire-and-forget variant of [saveWatchProgress] backed by an application-scoped coroutine.
+     * Safe to call from non-coroutine callbacks (e.g. Compose `onDispose`) without leaking work
+     * onto [kotlinx.coroutines.GlobalScope].
+     */
+    fun saveWatchProgressAsync(
+        episodeId: String,
+        animeId: String,
+        position: Long,
+        duration: Long,
+        animeTitle: String = "",
+        animeImageUrl: String = "",
+        animeSlug: String = "",
+        episodeNumber: Int = 0
+    ) {
+        appScope.launch {
+            saveWatchProgress(
+                episodeId, animeId, position, duration, animeTitle, animeImageUrl, animeSlug,
+                episodeNumber
+            )
+        }
     }
 
     suspend fun getWatchProgress(episodeId: String): WatchHistoryEntity? {
@@ -221,6 +273,95 @@ class AnimeRepository(
             )
             true
         }
+    }
+
+    // --- P2P sync (watch history + favorites) ---
+
+    /** Serializes watch history + favorites to a JSON string for LAN sync. */
+    suspend fun exportSyncPayload(): String {
+        val root = JSONObject()
+        val watchArr = JSONArray()
+        watchHistoryDao.getAllNow().forEach { w ->
+            watchArr.put(
+                JSONObject()
+                    .put("episodeId", w.episodeId)
+                    .put("animeId", w.animeId)
+                    .put("episodeNumber", w.episodeNumber)
+                    .put("watchedPositionMs", w.watchedPositionMs)
+                    .put("totalDurationMs", w.totalDurationMs)
+                    .put("lastWatchedTimestamp", w.lastWatchedTimestamp)
+                    .put("animeTitle", w.animeTitle)
+                    .put("animeImageUrl", w.animeImageUrl)
+                    .put("animeSlug", w.animeSlug)
+            )
+        }
+        val favArr = JSONArray()
+        favoriteDao.getAllNow().forEach { f ->
+            favArr.put(
+                JSONObject()
+                    .put("animeId", f.animeId)
+                    .put("title", f.title)
+                    .put("imageUrl", f.imageUrl)
+                    .put("animeUrl", f.animeUrl)
+                    .put("coverUrl", f.coverUrl ?: JSONObject.NULL)
+                    .put("addedAt", f.addedAt)
+            )
+        }
+        return root.put("watch", watchArr).put("favorites", favArr).toString()
+    }
+
+    /**
+     * Merges a peer's payload into the local DB. Watch history uses last-write-wins by
+     * timestamp; favorites are additive (union by animeId). Returns how many rows changed.
+     */
+    suspend fun importAndMerge(json: String): Int {
+        val root = JSONObject(json)
+
+        val localWatch = watchHistoryDao.getAllNow().associateBy { it.episodeId }
+        val incomingWatch = root.optJSONArray("watch") ?: JSONArray()
+        val watchToUpsert = mutableListOf<WatchHistoryEntity>()
+        for (i in 0 until incomingWatch.length()) {
+            val o = incomingWatch.getJSONObject(i)
+            val entity = WatchHistoryEntity(
+                episodeId = o.getString("episodeId"),
+                animeId = o.optString("animeId"),
+                episodeNumber = o.optInt("episodeNumber"),
+                watchedPositionMs = o.optLong("watchedPositionMs"),
+                totalDurationMs = o.optLong("totalDurationMs"),
+                lastWatchedTimestamp = o.optLong("lastWatchedTimestamp"),
+                animeTitle = o.optString("animeTitle"),
+                animeImageUrl = o.optString("animeImageUrl"),
+                animeSlug = o.optString("animeSlug")
+            )
+            val local = localWatch[entity.episodeId]
+            if (local == null || entity.lastWatchedTimestamp > local.lastWatchedTimestamp) {
+                watchToUpsert.add(entity)
+            }
+        }
+        if (watchToUpsert.isNotEmpty()) watchHistoryDao.upsertAll(watchToUpsert)
+
+        val localFavIds = favoriteDao.getAllNow().mapTo(HashSet()) { it.animeId }
+        val incomingFav = root.optJSONArray("favorites") ?: JSONArray()
+        val favToUpsert = mutableListOf<FavoriteEntity>()
+        for (i in 0 until incomingFav.length()) {
+            val o = incomingFav.getJSONObject(i)
+            val id = o.getString("animeId")
+            if (id !in localFavIds) {
+                favToUpsert.add(
+                    FavoriteEntity(
+                        animeId = id,
+                        title = o.optString("title"),
+                        imageUrl = o.optString("imageUrl"),
+                        animeUrl = o.optString("animeUrl"),
+                        coverUrl = if (o.isNull("coverUrl")) null else o.optString("coverUrl"),
+                        addedAt = o.optLong("addedAt", System.currentTimeMillis())
+                    )
+                )
+            }
+        }
+        if (favToUpsert.isNotEmpty()) favoriteDao.upsertAll(favToUpsert)
+
+        return watchToUpsert.size + favToUpsert.size
     }
 
     // --- Private helpers ---

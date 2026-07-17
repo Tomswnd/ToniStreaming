@@ -11,6 +11,12 @@ interface WatchHistoryDao {
     @Upsert
     suspend fun upsert(entity: WatchHistoryEntity)
 
+    @Upsert
+    suspend fun upsertAll(entities: List<WatchHistoryEntity>)
+
+    @Query("SELECT * FROM watch_history")
+    suspend fun getAllNow(): List<WatchHistoryEntity>
+
     @Query("SELECT * FROM watch_history WHERE episodeId = :episodeId")
     suspend fun getByEpisodeId(episodeId: String): WatchHistoryEntity?
 
