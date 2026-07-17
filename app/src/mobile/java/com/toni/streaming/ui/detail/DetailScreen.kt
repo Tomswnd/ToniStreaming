@@ -1,5 +1,9 @@
 package com.toni.streaming.ui.detail
 
+import android.Manifest
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -23,22 +27,33 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -53,6 +68,10 @@ import coil.compose.AsyncImage
 import com.toni.streaming.data.model.Episode
 import com.toni.streaming.data.model.RelatedAnime
 import com.toni.streaming.data.repository.AnimeRepository
+import com.toni.streaming.download.DownloadMetadata
+import com.toni.streaming.download.DownloadStatus
+import com.toni.streaming.download.EpisodeDownloadUi
+import com.toni.streaming.download.EpisodeDownloadsViewModel
 import com.toni.streaming.ui.components.ErrorDisplay
 import com.toni.streaming.ui.components.LoadingIndicator
 import com.toni.streaming.ui.detail.DetailViewModel
@@ -64,6 +83,7 @@ import com.toni.streaming.ui.theme.SuccessGreen
 import com.toni.streaming.ui.theme.TextPrimary
 import com.toni.streaming.ui.theme.TextSecondary
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DetailScreen(
     animeUrl: String,
@@ -74,8 +94,45 @@ fun DetailScreen(
     modifier: Modifier = Modifier,
     onRelatedClick: (RelatedAnime) -> Unit = {}
 ) {
+    val context = LocalContext.current
     val viewModel = remember { DetailViewModel(repository, animeUrl, animeId) }
     val uiState by viewModel.uiState.collectAsState()
+
+    val downloadsViewModel = remember { EpisodeDownloadsViewModel(context, repository) }
+    val downloadStates by downloadsViewModel.downloadStates.collectAsState()
+
+    // Episode whose completed download the user asked to delete (shows the confirm sheet)
+    var episodePendingDelete by remember { mutableStateOf<Episode?>(null) }
+
+    // On Android 13+ the download progress notification needs POST_NOTIFICATIONS;
+    // the download itself starts regardless of the user's choice.
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+
+    fun onDownloadAction(episode: Episode) {
+        val status = downloadStates[episode.id]?.status ?: DownloadStatus.NOT_DOWNLOADED
+        when (status) {
+            DownloadStatus.NOT_DOWNLOADED, DownloadStatus.FAILED -> {
+                if (Build.VERSION.SDK_INT >= 33) {
+                    notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+                downloadsViewModel.startDownload(
+                    episode,
+                    DownloadMetadata(
+                        animeId = animeId,
+                        episodeNumber = episode.number,
+                        animeTitle = uiState.animeDetails?.title ?: "",
+                        animeImageUrl = uiState.animeDetails?.imageUrl ?: ""
+                    )
+                )
+            }
+            DownloadStatus.QUEUED, DownloadStatus.DOWNLOADING ->
+                downloadsViewModel.removeDownload(episode.id)
+            DownloadStatus.COMPLETED -> episodePendingDelete = episode
+            DownloadStatus.PREPARING -> Unit
+        }
+    }
 
     Box(
         modifier = modifier
@@ -255,7 +312,9 @@ fun DetailScreen(
                             episode = epProgress.episode,
                             watchedPositionMs = progress?.watchedPositionMs ?: 0L,
                             totalDurationMs = progress?.totalDurationMs ?: 0L,
-                            onClick = { onEpisodeClick(epProgress.episode) }
+                            onClick = { onEpisodeClick(epProgress.episode) },
+                            downloadUi = downloadStates[epProgress.episode.id],
+                            onDownloadClick = { onDownloadAction(epProgress.episode) }
                         )
                     }
 
@@ -289,6 +348,126 @@ fun DetailScreen(
                 }
             }
         }
+
+        // ===== DELETE DOWNLOAD CONFIRMATION SHEET =====
+        episodePendingDelete?.let { episode ->
+            val bytes = downloadStates[episode.id]?.bytesDownloaded ?: 0L
+            ModalBottomSheet(
+                onDismissRequest = { episodePendingDelete = null },
+                containerColor = DarkSurfaceVariant
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 20.dp, end = 20.dp, bottom = 32.dp)
+                ) {
+                    Text(
+                        text = "Eliminare il download?",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = TextPrimary
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = buildString {
+                            append("Episodio ${episode.number}")
+                            if (bytes > 0) append(" · ${formatBytes(bytes)} verranno liberati")
+                            append(". Potrai riscaricarlo quando vuoi.")
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { episodePendingDelete = null },
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(text = "Annulla", color = TextPrimary)
+                        }
+                        Button(
+                            onClick = {
+                                downloadsViewModel.removeDownload(episode.id)
+                                episodePendingDelete = null
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE24B4A)),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(text = "Elimina", color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Single trailing action for episode downloads, cycling through four states:
+ * download arrow → progress ring (tap = cancel) → green done (tap = delete) → retry.
+ */
+@Composable
+private fun DownloadStateIcon(
+    downloadUi: EpisodeDownloadUi?,
+    onClick: () -> Unit
+) {
+    val status = downloadUi?.status ?: DownloadStatus.NOT_DOWNLOADED
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier.size(44.dp)
+    ) {
+        when (status) {
+            DownloadStatus.NOT_DOWNLOADED -> Icon(
+                imageVector = Icons.Default.Download,
+                contentDescription = "Scarica episodio",
+                tint = TextSecondary,
+                modifier = Modifier.size(22.dp)
+            )
+            DownloadStatus.PREPARING, DownloadStatus.QUEUED -> CircularProgressIndicator(
+                color = AccentPurple,
+                strokeWidth = 2.dp,
+                modifier = Modifier.size(22.dp)
+            )
+            DownloadStatus.DOWNLOADING -> Box(contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(
+                    progress = { (downloadUi?.percent ?: 0f) / 100f },
+                    color = AccentPurple,
+                    trackColor = AccentPurple.copy(alpha = 0.25f),
+                    strokeWidth = 2.5.dp,
+                    modifier = Modifier.size(26.dp)
+                )
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Annulla download",
+                    tint = TextSecondary,
+                    modifier = Modifier.size(11.dp)
+                )
+            }
+            DownloadStatus.COMPLETED -> Icon(
+                imageVector = Icons.Default.DownloadDone,
+                contentDescription = "Elimina download",
+                tint = SuccessGreen,
+                modifier = Modifier.size(22.dp)
+            )
+            DownloadStatus.FAILED -> Icon(
+                imageVector = Icons.Default.Refresh,
+                contentDescription = "Riprova download",
+                tint = Color(0xFFF09595),
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+}
+
+private fun formatBytes(bytes: Long): String {
+    return if (bytes >= 1_000_000_000) {
+        String.format("%.1f GB", bytes / 1_000_000_000.0)
+    } else {
+        String.format("%.0f MB", bytes / 1_000_000.0)
     }
 }
 
@@ -344,11 +523,13 @@ private fun EpisodeRow(
     episode: Episode,
     watchedPositionMs: Long,
     totalDurationMs: Long,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    downloadUi: EpisodeDownloadUi? = null,
+    onDownloadClick: () -> Unit = {}
 ) {
     val isStarted = watchedPositionMs > 0 && totalDurationMs > 0
     val isCompleted = isStarted && (totalDurationMs - watchedPositionMs < 15_000 || watchedPositionMs * 100 / totalDurationMs > 80)
-    
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -363,7 +544,7 @@ private fun EpisodeRow(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                    .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Status Icon
@@ -377,7 +558,9 @@ private fun EpisodeRow(
                 Spacer(modifier = Modifier.width(16.dp))
 
                 Column(
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(vertical = 6.dp)
                 ) {
                     Text(
                         text = "Episodio ${episode.number}",
@@ -394,7 +577,36 @@ private fun EpisodeRow(
                             color = TextSecondary
                         )
                     }
+
+                    when (downloadUi?.status) {
+                        DownloadStatus.PREPARING -> Text(
+                            text = "Preparazione download…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
+                        )
+                        DownloadStatus.QUEUED -> Text(
+                            text = "Download in coda",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
+                        )
+                        DownloadStatus.DOWNLOADING -> Text(
+                            text = "Download in corso · ${downloadUi.percent.toInt()}%",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
+                        )
+                        DownloadStatus.FAILED -> Text(
+                            text = "Download non riuscito · tocca per riprovare",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFF09595)
+                        )
+                        else -> Unit
+                    }
                 }
+
+                DownloadStateIcon(
+                    downloadUi = downloadUi,
+                    onClick = onDownloadClick
+                )
             }
 
             // Bottom progress bar for started episodes

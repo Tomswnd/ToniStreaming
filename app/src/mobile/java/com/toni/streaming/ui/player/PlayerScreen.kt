@@ -92,9 +92,17 @@ fun PlayerScreen(
     modifier: Modifier = Modifier,
     episodeNumber: Int = 0
 ) {
-    val viewModel = remember { PlayerViewModel(repository, animeId, episodeId, episodeUrl, episodeNumber) }
-    val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
+    val viewModel = remember {
+        val appContext = context.applicationContext
+        PlayerViewModel(
+            repository, animeId, episodeId, episodeUrl, episodeNumber,
+            offlineStreamResolver = { epId ->
+                com.toni.streaming.download.DownloadCenter.buildOfflineStreamInfo(appContext, epId)
+            }
+        )
+    }
+    val uiState by viewModel.uiState.collectAsState()
 
     // Force Landscape orientation on mobile while watching video
     LaunchedEffect(Unit) {
@@ -177,11 +185,15 @@ private fun VideoPlayer(
     var isNearEnd by remember { mutableStateOf(false) }
     var isPlaybackEnded by remember { mutableStateOf(false) }
 
-    // Configure the OkHttp data source
+    // OkHttp upstream wrapped in the download cache: locally downloaded episodes
+    // are read from disk (and play offline); everything else streams as before.
     val dataSourceFactory = remember(streamInfo) {
-        androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(repository.httpClient)
-            .setUserAgent(streamInfo.userAgent)
-            .setDefaultRequestProperties(streamInfo.headers)
+        com.toni.streaming.download.DownloadCenter.buildPlayerDataSourceFactory(
+            context = context,
+            upstreamClient = repository.httpClient,
+            userAgent = streamInfo.userAgent,
+            headers = streamInfo.headers
+        )
     }
 
     val mediaSourceFactory = remember(dataSourceFactory) {

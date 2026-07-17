@@ -27,7 +27,13 @@ class PlayerViewModel(
     private val animeId: String,
     private var episodeId: String,
     private var episodeUrl: String,
-    private var episodeNumber: Int = 0
+    private var episodeNumber: Int = 0,
+    /**
+     * Optional hook that resolves a locally downloaded copy of an episode.
+     * When it returns a StreamInfo, network extraction is skipped entirely,
+     * so downloaded episodes play even without a connection.
+     */
+    private val offlineStreamResolver: (suspend (episodeId: String) -> StreamInfo?)? = null
 ) : ViewModel() {
 
     companion object {
@@ -81,6 +87,19 @@ class PlayerViewModel(
             }
 
             _uiState.update { it.copy(startPositionMs = startPos) }
+
+            // If the episode was downloaded, play the local copy and skip extraction.
+            try {
+                offlineStreamResolver?.invoke(episodeId)?.let { offlineInfo ->
+                    Log.i(TAG, "Playing episode $episodeId from local download")
+                    _uiState.update { it.copy(streamInfo = offlineInfo, isLoading = false) }
+                    // Next-episode lookup needs the network; if offline it fails silently.
+                    fetchNextEpisode(offlineInfo)
+                    return@launch
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Offline stream resolution failed, falling back to network", e)
+            }
 
             // Extract stream info
             repository.getStreamInfo(episodeUrl).fold(
