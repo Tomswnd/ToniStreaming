@@ -12,9 +12,12 @@ Il progetto e strutturato in due varianti di compilazione indipendenti (Product 
 
 - Estrazione automatica dello streaming MP4 a 1080p da Vixcloud bypassando i controlli di sicurezza.
 - Cronologia locale con salvataggio automatico del punto di riproduzione.
-- Sezione "Continua a guardare" in Home Screen.
+- Sezione "Continua a guardare" in Home Screen, con badge dell'ultimo episodio visto.
+- Download degli episodi per la visione offline (variante Mobile): avvio dalla pagina dell'anime con notifica di avanzamento, sezione "Download" in Home Screen e riproduzione della copia locale anche senza connessione.
+- Sincronizzazione automatica e silenziosa di cronologia e preferiti tra dispositivi con l'app sulla stessa rete Wi-Fi.
 - Funzione di ricerca globale reattiva.
 - Pulsante per la riproduzione dell'episodio successivo integrato nel lettore (con countdown automatico).
+- Controlli del lettore condivisi tra le varianti, con fallback automatico di qualità sui dispositivi con decoder limitati.
 - Grafica scura personalizzata basata su componenti Material 3.
 
 ---
@@ -66,7 +69,7 @@ Per installare l'applicazione sulla televisione senza PC, il metodo piu semplice
 Il codice sorgente e suddiviso per massimizzare la condivisione delle logiche di business isolando i componenti grafici specifici:
 - `src/main`: Contiene i modelli dati, lo scraper, il database locale, i repository e i ViewModel condivisi.
 - `src/tv`: Contiene la MainActivity Leanback, le schermate TV (HomeScreen, DetailScreen, PlayerScreen) ottimizzate per D-pad e la dipendenza da `androidx.tv.material3`.
-- `src/mobile`: Contiene la MainActivity touch, la navigazione mobile, e le relative schermate touch-optimized.
+- `src/mobile`: Contiene la MainActivity touch, la navigazione mobile, le relative schermate touch-optimized e il package `download` (cache Media3, servizio in foreground e ViewModel per i download offline).
 
 ### Prerequisiti per la compilazione
 - JDK 17 o versioni successive
