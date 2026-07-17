@@ -35,7 +35,8 @@ fun AnimeCard(
     anime: Anime,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    progressRatio: Float? = null
+    progressRatio: Float? = null,
+    episodeNumber: Int? = null
 ) {
     Column(
         modifier = modifier
@@ -61,6 +62,26 @@ fun AnimeCard(
                     modifier = Modifier.fillMaxSize()
                 )
                 
+                // Episode badge (bottom-left), e.g. the last watched episode in "Continua a guardare".
+                if (episodeNumber != null && episodeNumber > 0) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(6.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color.Black.copy(alpha = 0.7f))
+                            .padding(horizontal = 6.dp, vertical = 3.dp)
+                    ) {
+                        Text(
+                            text = "Ep. $episodeNumber",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+                            ),
+                            color = Color.White
+                        )
+                    }
+                }
+
                 // Progress Bar overlay
                 if (progressRatio != null) {
                     Box(

@@ -350,11 +350,15 @@ fun HomeScreen(
                                                     entity.watchedPositionMs.toFloat() / entity.totalDurationMs.toFloat()
                                                 } else null
                                             }
+                                            val cwEpisodeNumbers = cw.associate { entity ->
+                                                entity.animeId to entity.episodeNumber.takeIf { it > 0 }
+                                            }
                                             MobileCatalogRow(
                                                 title = "Continua a guardare",
                                                 animes = cwAnimes,
                                                 onAnimeClick = onAnimeClick,
-                                                progressFor = { cwRatios[it.id] }
+                                                progressFor = { cwRatios[it.id] },
+                                                episodeNumberFor = { cwEpisodeNumbers[it.id] }
                                             )
                                         }
                                     }
@@ -427,7 +431,8 @@ private fun MobileCatalogRow(
     title: String,
     animes: List<Anime>,
     onAnimeClick: (Anime) -> Unit,
-    progressFor: ((Anime) -> Float?)? = null
+    progressFor: ((Anime) -> Float?)? = null,
+    episodeNumberFor: ((Anime) -> Int?)? = null
 ) {
     Column {
         Text(
@@ -445,6 +450,7 @@ private fun MobileCatalogRow(
                 AnimeCard(
                     anime = anime,
                     progressRatio = progressFor?.invoke(anime),
+                    episodeNumber = episodeNumberFor?.invoke(anime),
                     onClick = { onAnimeClick(anime) }
                 )
             }
