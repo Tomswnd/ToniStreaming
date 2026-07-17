@@ -45,6 +45,12 @@ data class EpisodeDownloadUi(
     val bytesDownloaded: Long = 0L
 )
 
+/** A completed download with the metadata needed to list and play it (e.g. on the home screen). */
+data class DownloadedEpisode(
+    val episodeId: String,
+    val metadata: DownloadMetadata
+)
+
 /**
  * Tracks the download state of every episode (keyed by Episode.id) and exposes
  * start/cancel/remove actions. Backed by the Media3 DownloadManager, which
@@ -66,6 +72,21 @@ class EpisodeDownloadsViewModel(
     private val _downloadStates = MutableStateFlow<Map<String, EpisodeDownloadUi>>(emptyMap())
     val downloadStates: StateFlow<Map<String, EpisodeDownloadUi>> = _downloadStates.asStateFlow()
 
+    /** Completed downloads, sorted by anime title then episode number (for the home "Download" row). */
+    private val _completedDownloads = MutableStateFlow<List<DownloadedEpisode>>(emptyList())
+    val completedDownloads: StateFlow<List<DownloadedEpisode>> = _completedDownloads.asStateFlow()
+
+    private fun putCompleted(episodeId: String, metadata: DownloadMetadata) {
+        _completedDownloads.update { list ->
+            (list.filter { it.episodeId != episodeId } + DownloadedEpisode(episodeId, metadata))
+                .sortedWith(compareBy({ it.metadata.animeTitle.lowercase() }, { it.metadata.episodeNumber }))
+        }
+    }
+
+    private fun removeCompleted(episodeId: String) {
+        _completedDownloads.update { list -> list.filter { it.episodeId != episodeId } }
+    }
+
     private var progressJob: Job? = null
 
     private val listener = object : DownloadManager.Listener {
@@ -80,6 +101,7 @@ class EpisodeDownloadsViewModel(
 
         override fun onDownloadRemoved(downloadManager: DownloadManager, download: Download) {
             _downloadStates.update { it - download.request.id }
+            removeCompleted(download.request.id)
         }
     }
 
@@ -212,6 +234,11 @@ class EpisodeDownloadsViewModel(
             _downloadStates.update { it - download.request.id }
         } else {
             _downloadStates.update { it + (download.request.id to ui) }
+        }
+        if (ui.status == DownloadStatus.COMPLETED) {
+            putCompleted(download.request.id, DownloadMetadata.fromJsonBytes(download.request.data))
+        } else {
+            removeCompleted(download.request.id)
         }
     }
 

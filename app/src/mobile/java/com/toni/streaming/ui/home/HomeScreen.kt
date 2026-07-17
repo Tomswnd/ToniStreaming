@@ -66,6 +66,9 @@ import coil.compose.AsyncImage
 import com.toni.streaming.data.local.WatchHistoryEntity
 import com.toni.streaming.data.model.Anime
 import com.toni.streaming.data.repository.AnimeRepository
+import com.toni.streaming.download.DownloadedEpisode
+import com.toni.streaming.download.EpisodeDownloadsViewModel
+import androidx.compose.material.icons.filled.DownloadDone
 import com.toni.streaming.ui.components.AnimeCard
 import com.toni.streaming.ui.components.ErrorDisplay
 import com.toni.streaming.ui.components.LoadingIndicator
@@ -82,7 +85,8 @@ import com.toni.streaming.ui.home.HomeUiState
 @Composable
 fun HomeScreen(
     onAnimeClick: (Anime) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onDownloadedEpisodeClick: (DownloadedEpisode) -> Unit = {}
 ) {
     val context = LocalContext.current
     val repository = remember { AnimeRepository.getInstance(context) }
@@ -90,6 +94,10 @@ fun HomeScreen(
         factory = viewModelFactory { initializer { HomeViewModel(repository) } }
     )
     val uiState by viewModel.uiState.collectAsState()
+
+    // Downloaded episodes (playable offline) shown in the "Download" row.
+    val downloadsViewModel = remember { EpisodeDownloadsViewModel(context, repository) }
+    val downloadedEpisodes by downloadsViewModel.completedDownloads.collectAsState()
 
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
@@ -212,12 +220,23 @@ fun HomeScreen(
                     uiState.isSearching -> {
                         LoadingIndicator(message = "Ricerca in corso…")
                     }
-                    // Error state
+                    // Error state (downloads stay reachable even when the catalog can't load, e.g. offline)
                     uiState.error != null && uiState.featuredList.isEmpty() -> {
-                        ErrorDisplay(
-                            message = uiState.error ?: "Errore sconosciuto",
-                            onRetry = { viewModel.retry() }
-                        )
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            if (downloadedEpisodes.isNotEmpty()) {
+                                MobileDownloadsRow(
+                                    episodes = downloadedEpisodes,
+                                    onEpisodeClick = onDownloadedEpisodeClick
+                                )
+                                Spacer(modifier = Modifier.height(20.dp))
+                            }
+                            Box(modifier = Modifier.weight(1f)) {
+                                ErrorDisplay(
+                                    message = uiState.error ?: "Errore sconosciuto",
+                                    onRetry = { viewModel.retry() }
+                                )
+                            }
+                        }
                     }
                     // Search results (Touch-optimized mobile grids/rows)
                     uiState.searchQuery.length >= 2 -> {
@@ -265,7 +284,7 @@ fun HomeScreen(
                     }
                     // Normal state: Featured Banner Carousel + Continue Watching + Catalog
                     else -> {
-                        if (uiState.featuredList.isEmpty() && uiState.popularList.isEmpty() && uiState.mostViewedList.isEmpty()) {
+                        if (uiState.featuredList.isEmpty() && uiState.popularList.isEmpty() && uiState.mostViewedList.isEmpty() && downloadedEpisodes.isEmpty()) {
                             Column(
                                 modifier = Modifier.fillMaxSize(),
                                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -336,6 +355,16 @@ fun HomeScreen(
                                                 animes = cwAnimes,
                                                 onAnimeClick = onAnimeClick,
                                                 progressFor = { cwRatios[it.id] }
+                                            )
+                                        }
+                                    }
+
+                                    // 2a. ===== DOWNLOADS ROW (episodes playable offline) =====
+                                    if (downloadedEpisodes.isNotEmpty()) {
+                                        item {
+                                            MobileDownloadsRow(
+                                                episodes = downloadedEpisodes,
+                                                onEpisodeClick = onDownloadedEpisodeClick
                                             )
                                         }
                                     }
@@ -420,6 +449,107 @@ private fun MobileCatalogRow(
                 )
             }
         }
+    }
+}
+
+/**
+ * "Download" row: one card per downloaded episode, playable offline. Cards are keyed by
+ * episode id (the same anime can appear multiple times, once per episode).
+ */
+@Composable
+private fun MobileDownloadsRow(
+    episodes: List<DownloadedEpisode>,
+    onEpisodeClick: (DownloadedEpisode) -> Unit
+) {
+    Column {
+        Text(
+            text = "Download",
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+            color = TextPrimary,
+            modifier = Modifier.padding(start = 16.dp, bottom = 8.dp)
+        )
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            items(items = episodes, key = { it.episodeId }) { episode ->
+                DownloadedEpisodeCard(
+                    episode = episode,
+                    onClick = { onEpisodeClick(episode) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadedEpisodeCard(
+    episode: DownloadedEpisode,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .width(130.dp)
+            .clickable { onClick() }
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(0.7f),
+            shape = RoundedCornerShape(10.dp),
+            colors = CardDefaults.cardColors(containerColor = DarkSurfaceVariant)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(10.dp))
+            ) {
+                AsyncImage(
+                    model = episode.metadata.animeImageUrl,
+                    contentDescription = episode.metadata.animeTitle,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+                // Episode badge (bottom-left) with the offline icon.
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(6.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(Color.Black.copy(alpha = 0.7f))
+                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DownloadDone,
+                        contentDescription = null,
+                        tint = AccentPurple,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "Ep. ${episode.metadata.episodeNumber}",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = TextPrimary
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        Text(
+            text = episode.metadata.animeTitle.ifBlank { "Episodio ${episode.metadata.episodeNumber}" },
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 2.dp),
+            color = TextSecondary
+        )
     }
 }
 

@@ -33,6 +33,18 @@ fun AppNavigation(
                         Screen.Detail.createRoute(anime.id, encodedUrl)
                     )
                 },
+                onDownloadedEpisodeClick = { downloaded ->
+                    // The episode URL is only used as a network fallback: for a completed
+                    // download the player resolves the local copy, so a placeholder is fine.
+                    navController.navigate(
+                        Screen.Player.createRoute(
+                            downloaded.metadata.animeId,
+                            downloaded.episodeId,
+                            downloaded.metadata.episodeNumber,
+                            "offline"
+                        )
+                    )
+                },
                 modifier = Modifier.fillMaxSize()
             )
         }
