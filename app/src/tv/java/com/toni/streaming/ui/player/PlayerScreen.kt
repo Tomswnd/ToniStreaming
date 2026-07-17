@@ -5,6 +5,7 @@ import android.view.KeyEvent
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
@@ -17,7 +18,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -25,7 +28,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -34,22 +41,28 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -70,11 +83,8 @@ import com.toni.streaming.ui.theme.TextPrimary
 import com.toni.streaming.ui.theme.TextSecondary
 import androidx.tv.material3.Text
 import androidx.tv.material3.MaterialTheme
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -82,12 +92,17 @@ fun PlayerScreen(
     animeId: String,
     episodeId: String,
     episodeUrl: String,
-    repository: AnimeRepository,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     episodeNumber: Int = 0
 ) {
-    val viewModel = remember { PlayerViewModel(repository, animeId, episodeId, episodeUrl, episodeNumber) }
+    val context = LocalContext.current
+    val repository = remember { AnimeRepository.getInstance(context) }
+    val viewModel: PlayerViewModel = viewModel(
+        factory = viewModelFactory {
+            initializer { PlayerViewModel(repository, animeId, episodeId, episodeUrl, episodeNumber) }
+        }
+    )
     val uiState by viewModel.uiState.collectAsState()
 
     // Register BackHandler to cleanly pop back stack on system back button press
@@ -116,6 +131,7 @@ fun PlayerScreen(
                         streamInfo = uiState.streamInfo!!,
                         animeId = animeId,
                         episodeId = uiState.currentEpisodeId,
+                        episodeNumber = uiState.currentEpisodeNumber,
                         startPositionMs = uiState.startPositionMs,
                         nextEpisode = uiState.nextEpisode,
                         onPlayNext = { viewModel.playEpisode(it) },
@@ -135,6 +151,7 @@ private fun VideoPlayer(
     streamInfo: StreamInfo,
     animeId: String,
     episodeId: String,
+    episodeNumber: Int,
     startPositionMs: Long,
     nextEpisode: Episode?,
     onPlayNext: (Episode) -> Unit,
@@ -143,343 +160,156 @@ private fun VideoPlayer(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var isControllerVisible by remember { mutableStateOf(false) }
+    var isControllerVisible by remember { mutableStateOf(true) }
 
-    // Next episode states
-    var timeRemainingSeconds by remember { mutableStateOf(0) }
-    var isNearEnd by remember { mutableStateOf(false) }
-    var isPlaybackEnded by remember { mutableStateOf(false) }
+    val (exoPlayer, playerState) = rememberManagedExoPlayer(
+        streamInfo = streamInfo,
+        repository = repository,
+        animeId = animeId,
+        episodeId = episodeId,
+        episodeNumber = episodeNumber,
+        startPositionMs = startPositionMs,
+        keepScreenOn = false,
+        enableTunneling = true
+    )
 
-    // Configure the OkHttp data source with the shared httpClient and dynamic headers
-    val dataSourceFactory = remember(streamInfo) {
-        Log.d("ToniPlayer", "Configuring OkHttpDataSource.Factory for stream")
-        Log.d("ToniPlayer", "Target playlist URL: ${streamInfo.m3u8Url}")
-        
-        androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(repository.httpClient)
-            .setUserAgent(streamInfo.userAgent)
-            .setDefaultRequestProperties(streamInfo.headers)
-    }
+    // ===== Custom TV controls state (no native controller / MediaSession) =====
+    var positionMs by remember { mutableStateOf(0L) }
+    var durationMs by remember { mutableStateOf(0L) }
+    var isPlaying by remember { mutableStateOf(true) }
+    var interactionTick by remember { mutableStateOf(0) }
 
-    // Create the media source factory that automatically detects the format (HLS or MP4)
-    val mediaSourceFactory = remember(dataSourceFactory) {
-        androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dataSourceFactory)
-    }
-
-    // Create the media item
-    val mediaItem = remember(streamInfo) {
-        MediaItem.fromUri(streamInfo.m3u8Url)
-    }
-
-    // Create and configure ExoPlayer with error listener
-    val exoPlayer = remember {
-        ExoPlayer.Builder(context)
-            .setMediaSourceFactory(mediaSourceFactory)
-            .build()
-            .apply {
-                addListener(object : androidx.media3.common.Player.Listener {
-                    override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                        Log.e("ToniPlayer", "ExoPlayer error: ${error.message}", error)
-                    }
-
-                    override fun onPlaybackStateChanged(playbackState: Int) {
-                        isPlaybackEnded = playbackState == androidx.media3.common.Player.STATE_ENDED
-                        Log.d("ToniPlayer", "Playback state changed: $playbackState")
-                    }
-                })
-                setMediaItem(mediaItem)
-                if (startPositionMs > 0) {
-                    seekTo(startPositionMs)
-                }
-                prepare()
-                playWhenReady = true
-            }
-    }
-
-    // Periodically save watch history progress and detect video ending (every 1 second)
+    // Poll the player for the seek bar / play state (UI only). Guarded: never let a stray
+    // read on a released/transitioning player crash the screen.
     LaunchedEffect(exoPlayer) {
         while (isActive) {
-            delay(1000)
-            val currentPos = exoPlayer.currentPosition
-            val duration = exoPlayer.duration
-            if (duration > 0 && currentPos > 0) {
-                // Save watch history progress database-side
-                repository.saveWatchProgress(
-                    episodeId = episodeId,
-                    animeId = animeId,
-                    position = currentPos,
-                    duration = duration,
-                    animeTitle = streamInfo.animeTitle,
-                    animeImageUrl = streamInfo.animeImageUrl,
-                    animeSlug = streamInfo.animeSlug
-                )
-
-                // Detect if the video is nearing its end (e.g. less than 30 seconds left)
-                val remainingMs = duration - currentPos
-                timeRemainingSeconds = (remainingMs / 1000).toInt()
-                isNearEnd = remainingMs < 30_000
-            }
+            try {
+                positionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
+                durationMs = exoPlayer.duration.coerceAtLeast(0L)
+                isPlaying = exoPlayer.isPlaying
+            } catch (_: Exception) {}
+            delay(400)
         }
     }
 
-    // Pause playback when the app goes to the background, so audio/video does not keep
-    // running off-screen. Playback stays paused until the user resumes it manually.
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, exoPlayer) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
-                exoPlayer.pause()
-            }
+    // Auto-hide the controls a few seconds after the last interaction (only while playing).
+    LaunchedEffect(interactionTick, isPlaying, playerState.isPlaybackEnded) {
+        if (isControllerVisible && isPlaying && !playerState.isPlaybackEnded) {
+            delay(4000)
+            isControllerVisible = false
         }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // Save final watch progress and release the player when leaving the screen
-    DisposableEffect(Unit) {
-        onDispose {
-            val currentPos = exoPlayer.currentPosition
-            val duration = exoPlayer.duration
-            if (duration > 0 && currentPos > 0) {
-                @Suppress("OPT_IN_USAGE")
-                GlobalScope.launch(Dispatchers.IO) {
-                    repository.saveWatchProgress(
-                        episodeId = episodeId,
-                        animeId = animeId,
-                        position = currentPos,
-                        duration = duration,
-                        animeTitle = streamInfo.animeTitle,
-                        animeImageUrl = streamInfo.animeImageUrl,
-                        animeSlug = streamInfo.animeSlug
-                    )
-                }
-            }
-            exoPlayer.release()
-        }
+    fun showControls() {
+        isControllerVisible = true
+        interactionTick++
     }
+    fun togglePlayPause() {
+        try {
+            if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+            isPlaying = exoPlayer.isPlaying
+        } catch (_: Exception) {}
+    }
+    fun seekBy(deltaMs: Long) {
+        try {
+            val dur = exoPlayer.duration
+            val target = (exoPlayer.currentPosition + deltaMs)
+                .coerceIn(0L, if (dur > 0) dur else Long.MAX_VALUE)
+            exoPlayer.seekTo(target)
+            positionMs = target
+        } catch (_: Exception) {}
+    }
+
 
     // Requester to auto-focus the next episode button when video ends
-    val focusRequester = remember { FocusRequester() }
+    val rootFocus = remember { FocusRequester() }
+    val backFocus = remember { FocusRequester() }
+    val nextFocus = remember { FocusRequester() }
+    val rewindFocus = remember { FocusRequester() }
+    val playFocus = remember { FocusRequester() }
+    val forwardFocus = remember { FocusRequester() }
+    val hasNext = nextEpisode != null
+
+    // The surface owns focus while controls are hidden, so ANY key reveals the UI.
+    LaunchedEffect(Unit) { try { rootFocus.requestFocus() } catch (_: Exception) {} }
+
+    // Move focus onto the controls when they appear; hand it back to the surface when they hide.
+    LaunchedEffect(isControllerVisible, playerState.isPlaybackEnded) {
+        try {
+            if (isControllerVisible) {
+                delay(60)
+                if (playerState.isPlaybackEnded && hasNext) nextFocus.requestFocus() else playFocus.requestFocus()
+            } else {
+                rootFocus.requestFocus()
+            }
+        } catch (_: Exception) {}
+    }
+
+    // When the video ends, reveal the controls so the next episode / back buttons are reachable.
+    LaunchedEffect(playerState.isPlaybackEnded) { if (playerState.isPlaybackEnded) isControllerVisible = true }
 
     Box(
         modifier = modifier
             .fillMaxSize()
+            .background(Color.Black)
+            .focusRequester(rootFocus)
             .focusable()
-            .onKeyEvent { keyEvent ->
-                // Shortcut: If we are near the end (<30s) and user presses OK/Select on the remote,
-                // immediately transition to the next episode! This avoids D-pad focus lock issues.
-                if (isNearEnd && nextEpisode != null) {
-                    if (keyEvent.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_DPAD_CENTER ||
-                        keyEvent.nativeKeyEvent.keyCode == android.view.KeyEvent.KEYCODE_ENTER) {
-                        if (keyEvent.nativeKeyEvent.action == android.view.KeyEvent.ACTION_DOWN) {
-                            onPlayNext(nextEpisode)
-                        }
-                        return@onKeyEvent true
+            .onPreviewKeyEvent { e ->
+                val code = e.nativeKeyEvent.keyCode
+                if (code == android.view.KeyEvent.KEYCODE_BACK) return@onPreviewKeyEvent false
+                if (e.nativeKeyEvent.action == android.view.KeyEvent.ACTION_DOWN) {
+                    when (code) {
+                        android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { showControls(); togglePlayPause(); return@onPreviewKeyEvent true }
+                        android.view.KeyEvent.KEYCODE_MEDIA_PLAY -> { showControls(); try { exoPlayer.play() } catch (_: Exception) {}; return@onPreviewKeyEvent true }
+                        android.view.KeyEvent.KEYCODE_MEDIA_PAUSE -> { showControls(); try { exoPlayer.pause() } catch (_: Exception) {}; return@onPreviewKeyEvent true }
+                        android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> { showControls(); seekBy(-10_000L); return@onPreviewKeyEvent true }
+                        android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { showControls(); seekBy(10_000L); return@onPreviewKeyEvent true }
+                        android.view.KeyEvent.KEYCODE_MEDIA_NEXT -> { nextEpisode?.let { onPlayNext(it) }; return@onPreviewKeyEvent true }
                     }
+                    if (!isControllerVisible) {
+                        showControls()
+                        return@onPreviewKeyEvent true
+                    }
+                    interactionTick++
                 }
                 false
             }
     ) {
-        // Render AndroidView PlayerView only if playback is not ended.
-        // If playback ends, removing the AndroidView releases focus from ExoPlayer control views,
-        // allowing the D-pad to smoothly select the Next Episode Compose button!
-        if (!isPlaybackEnded) {
-            AndroidView(
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        player = exoPlayer
-                        useController = true
-                        setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-                        
-                        // Track when the playback controller is shown or hidden
-                        setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
-                            isControllerVisible = visibility == android.view.View.VISIBLE
-                        })
-                    }
-                },
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            // Clean black screen when playback has fully ended
-            Box(modifier = Modifier.fillMaxSize().background(Color.Black))
-        }
+        AndroidView(
+            factory = { ctx ->
+                val view = android.view.LayoutInflater.from(ctx)
+                    .inflate(com.toni.streaming.R.layout.custom_player_view, null) as PlayerView
+                view.apply {
+                    setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                }
+            },
+            update = { view ->
+                view.player = exoPlayer
+            },
+            modifier = Modifier.fillMaxSize()
+        )
 
-        // Overlay Back Button (visible when player controls are shown)
         AnimatedVisibility(
-            visible = isControllerVisible || isPlaybackEnded,
+            visible = isControllerVisible,
             enter = fadeIn(),
             exit = fadeOut(),
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(24.dp)
+            modifier = Modifier.fillMaxSize()
         ) {
-            androidx.tv.material3.IconButton(
-                onClick = onBack,
-                colors = androidx.tv.material3.IconButtonDefaults.colors(
-                    containerColor = Color.Black.copy(alpha = 0.5f),
-                    focusedContainerColor = AccentPurple
-                ),
-                modifier = Modifier.size(48.dp)
-            ) {
-                androidx.tv.material3.Icon(
-                    imageVector = Icons.Default.ArrowBack,
-                    contentDescription = "Indietro",
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-        }
-
-        // ===== NEXT EPISODE POPUP OVERLAY =====
-        if (nextEpisode != null) {
-            // Case 1: Video has ended entirely -> Show giant next episode card in the center with auto-focus
-            if (isPlaybackEnded) {
-                LaunchedEffect(isPlaybackEnded) {
-                    if (isPlaybackEnded) {
-                        delay(300)
-                        try {
-                            focusRequester.requestFocus()
-                            Log.d("ToniPlayer", "Requested focus on Next Episode giant button")
-                        } catch (e: Exception) {
-                            Log.e("ToniPlayer", "Request focus failed", e)
-                        }
-                    }
-                }
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.85f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Text(
-                            text = "Episodio Completato",
-                            color = TextSecondary,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(modifier = Modifier.height(18.dp))
-
-                        var isBtnFocused by remember { mutableStateOf(false) }
-
-                        // Giant Gradient purple D-pad focusable button
-                        Box(
-                            modifier = Modifier
-                                .focusRequester(focusRequester)
-                                .clickable { onPlayNext(nextEpisode) }
-                                .focusable()
-                                .onFocusChanged { isBtnFocused = it.isFocused }
-                                .shadow(
-                                    elevation = if (isBtnFocused) 20.dp else 4.dp,
-                                    shape = RoundedCornerShape(16.dp),
-                                    ambientColor = AccentPurple.copy(alpha = 0.5f)
-                                )
-                                .then(
-                                    if (isBtnFocused) Modifier.border(3.dp, Color.White, RoundedCornerShape(16.dp))
-                                    else Modifier
-                                )
-                                .background(
-                                    brush = Brush.horizontalGradient(colors = listOf(AccentPurple, AccentBlue)),
-                                    shape = RoundedCornerShape(16.dp)
-                                )
-                                .padding(horizontal = 36.dp, vertical = 18.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                androidx.tv.material3.Icon(
-                                    imageVector = Icons.Default.PlayArrow,
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                                Text(
-                                    text = "Prossimo Episodio: Ep. ${nextEpisode.number}",
-                                    color = Color.White,
-                                    style = MaterialTheme.typography.headlineSmall,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(28.dp))
-                        Text(
-                            text = "Oppure premi INDIETRO per uscire",
-                            color = TextSecondary.copy(alpha = 0.7f),
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
-                }
-            } 
-            // Case 2: Video is nearing end (last 30s) -> Show Netflix-style compact popup in the bottom right corner
-            else if (isNearEnd) {
-                var isPopupFocused by remember { mutableStateOf(false) }
-                
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(bottom = 96.dp, end = 48.dp) // Avoid covering system navigation elements
-                        .clickable { onPlayNext(nextEpisode) }
-                        .focusable()
-                        .onFocusChanged { isPopupFocused = it.isFocused }
-                        .shadow(
-                            elevation = if (isPopupFocused) 16.dp else 6.dp,
-                            shape = RoundedCornerShape(16.dp),
-                            ambientColor = AccentPurple.copy(alpha = 0.3f)
-                        )
-                        .then(
-                            if (isPopupFocused) Modifier.border(3.dp, Color.White, RoundedCornerShape(16.dp))
-                            else Modifier
-                        )
-                        .background(
-                            brush = Brush.horizontalGradient(colors = listOf(AccentPurple, AccentBlue)),
-                            shape = RoundedCornerShape(16.dp)
-                        )
-                        .padding(horizontal = 24.dp, vertical = 14.dp)
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.Start
-                    ) {
-                        Text(
-                            text = "PROSSIMO EPISODIO IN ARRIVO",
-                            color = Color.White.copy(alpha = 0.8f),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(
-                                text = "Episodio ${nextEpisode.number}",
-                                color = Color.White,
-                                style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.ExtraBold
-                            )
-                            Text(
-                                text = "tra ${timeRemainingSeconds}s",
-                                color = Color.White.copy(alpha = 0.9f),
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Premi OK sul telecomando per riprodurre ora",
-                            color = Color.White.copy(alpha = 0.7f),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontSize = 10.sp
-                        )
-                    }
-                }
-            }
+            PlayerControlsOverlay(
+                isPlaying = isPlaying,
+                positionMs = positionMs,
+                durationMs = durationMs,
+                hasNext = hasNext,
+                isNearEnd = playerState.isNearEnd,
+                isPlaybackEnded = playerState.isPlaybackEnded,
+                timeRemainingSeconds = playerState.timeRemainingSeconds,
+                onBack = onBack,
+                onPlayPause = { togglePlayPause(); showControls() },
+                onRewind = { seekBy(-10_000L); showControls() },
+                onForward = { seekBy(10_000L); showControls() },
+                onNext = { nextEpisode?.let { onPlayNext(it) } },
+                focus = PlayerControlFocus(backFocus, nextFocus, rewindFocus, playFocus, forwardFocus)
+            )
         }
     }
 }

@@ -23,7 +23,20 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import com.toni.streaming.data.sync.SyncManager
+import com.toni.streaming.data.sync.SyncPeer
+import kotlinx.coroutines.launch
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
@@ -36,6 +49,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
@@ -84,11 +100,14 @@ import com.toni.streaming.ui.theme.TextSecondary
 @OptIn(ExperimentalTvMaterial3Api::class, ExperimentalComposeUiApi::class)
 @Composable
 fun HomeScreen(
-    repository: AnimeRepository,
     onAnimeClick: (Anime) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val viewModel = remember { HomeViewModel(repository) }
+    val context = LocalContext.current
+    val repository = remember { AnimeRepository.getInstance(context) }
+    val viewModel: HomeViewModel = viewModel(
+        factory = viewModelFactory { initializer { HomeViewModel(repository) } }
+    )
     val uiState by viewModel.uiState.collectAsState()
     val keyboardController = LocalSoftwareKeyboardController.current
 
@@ -101,6 +120,22 @@ fun HomeScreen(
         if (keyboardActive) {
             kotlinx.coroutines.delay(60)
             keyboardController?.show()
+        }
+    }
+
+    // Background LAN discovery + SILENT auto-sync: when another device with the app appears on
+    // the Wi-Fi, sync watch history + favorites automatically (once per device), no UI.
+    val syncManager = remember { SyncManager(context, repository) }
+    DisposableEffect(Unit) {
+        syncManager.start()
+        onDispose { syncManager.dispose() }
+    }
+    val syncPeers by syncManager.peers.collectAsState()
+    val syncedPeers = remember { mutableStateListOf<String>() }
+    LaunchedEffect(syncPeers) {
+        syncPeers.filter { it.id !in syncedPeers }.forEach { peer ->
+            syncedPeers.add(peer.id)
+            syncManager.syncWith(peer)
         }
     }
 
@@ -153,21 +188,6 @@ fun HomeScreen(
                             tint = TextSecondary,
                             modifier = Modifier.size(20.dp)
                         )
-                    },
-                    trailingIcon = {
-                        if (uiState.searchQuery.isNotEmpty()) {
-                            IconButton(onClick = {
-                                viewModel.clearSearch()
-                                keyboardActive = false
-                                keyboardController?.hide()
-                            }) {
-                                Icon(
-                                    imageVector = Icons.Default.Clear,
-                                    contentDescription = "Cancella",
-                                    tint = TextSecondary
-                                )
-                            }
-                        }
                     },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
@@ -351,145 +371,66 @@ fun HomeScreen(
                                         // 2. ===== CONTINUE WATCHING ROW =====
                                         if (uiState.continueWatchingList.isNotEmpty()) {
                                             item {
-                                                Column {
-                                                    Text(
-                                                        text = "Continua a guardare",
-                                                        style = MaterialTheme.typography.headlineSmall.copy(
-                                                            fontWeight = FontWeight.Bold,
-                                                            fontSize = 20.sp
-                                                        ),
-                                                        color = TextPrimary,
-                                                        modifier = Modifier.padding(start = 48.dp, bottom = 12.dp)
+                                                val cw = uiState.continueWatchingList
+                                                val cwAnimes = cw.map { entity ->
+                                                    Anime(
+                                                        id = entity.animeId,
+                                                        title = entity.animeTitle,
+                                                        imageUrl = entity.animeImageUrl,
+                                                        episodeUrl = "https://www.animeunity.so/anime/${entity.animeId}-${entity.animeSlug}"
                                                     )
-                                                    TvLazyRow(
-                                                        contentPadding = PaddingValues(start = 48.dp, end = 48.dp, top = 12.dp, bottom = 12.dp),
-                                                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                                                        modifier = Modifier.fillMaxWidth().height(330.dp) // Height increased to 330.dp to give outer scaled box 100% stable bounds!
-                                                    ) {
-                                                        items(
-                                                            items = uiState.continueWatchingList,
-                                                            key = { it.episodeId }
-                                                        ) { entity ->
-                                                            val anime = Anime(
-                                                                id = entity.animeId,
-                                                                title = entity.animeTitle,
-                                                                imageUrl = entity.animeImageUrl,
-                                                                episodeUrl = "https://www.animeunity.so/anime/${entity.animeId}-${entity.animeSlug}"
-                                                            )
-                                                            val progressRatio = if (entity.totalDurationMs > 0) {
-                                                                entity.watchedPositionMs.toFloat() / entity.totalDurationMs.toFloat()
-                                                            } else null
-
-                                                            AnimeCard(
-                                                                anime = anime,
-                                                                progressRatio = progressRatio,
-                                                                onClick = { onAnimeClick(anime) }
-                                                            )
-                                                        }
-                                                    }
                                                 }
+                                                val cwRatios = cw.associate { entity ->
+                                                    entity.animeId to if (entity.totalDurationMs > 0) {
+                                                        entity.watchedPositionMs.toFloat() / entity.totalDurationMs.toFloat()
+                                                    } else null
+                                                }
+                                                TvCatalogRow(
+                                                    title = "Continua a guardare",
+                                                    animes = cwAnimes,
+                                                    onAnimeClick = onAnimeClick,
+                                                    progressFor = { cwRatios[it.id] }
+                                                )
                                             }
                                         }
 
                                         // 2b. ===== FAVORITES ROW =====
                                         if (uiState.favoritesList.isNotEmpty()) {
                                             item {
-                                                Column {
-                                                    Text(
-                                                        text = "Preferiti",
-                                                        style = MaterialTheme.typography.headlineSmall.copy(
-                                                            fontWeight = FontWeight.Bold,
-                                                            fontSize = 20.sp
-                                                        ),
-                                                        color = TextPrimary,
-                                                        modifier = Modifier.padding(start = 48.dp, bottom = 12.dp)
-                                                    )
-                                                    TvLazyRow(
-                                                        contentPadding = PaddingValues(start = 48.dp, end = 48.dp, top = 12.dp, bottom = 12.dp),
-                                                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                                                        modifier = Modifier.fillMaxWidth().height(330.dp)
-                                                    ) {
-                                                        items(
-                                                            items = uiState.favoritesList,
-                                                            key = { "fav_${it.animeId}" }
-                                                        ) { fav ->
-                                                            val anime = Anime(
-                                                                id = fav.animeId,
-                                                                title = fav.title,
-                                                                imageUrl = fav.imageUrl,
-                                                                episodeUrl = fav.animeUrl
-                                                            )
-                                                            AnimeCard(
-                                                                anime = anime,
-                                                                onClick = { onAnimeClick(anime) }
-                                                            )
-                                                        }
-                                                    }
-                                                }
+                                                TvCatalogRow(
+                                                    title = "Preferiti",
+                                                    animes = uiState.favoritesList.map { fav ->
+                                                        Anime(
+                                                            id = fav.animeId,
+                                                            title = fav.title,
+                                                            imageUrl = fav.imageUrl,
+                                                            episodeUrl = fav.animeUrl
+                                                        )
+                                                    },
+                                                    onAnimeClick = onAnimeClick
+                                                )
                                             }
                                         }
 
                                         // 3. ===== POPULAR CATALOG ROW (popularList - popular=true) =====
                                         if (uiState.popularList.isNotEmpty()) {
                                             item {
-                                                Column {
-                                                    Text(
-                                                        text = "Più popolari",
-                                                        style = MaterialTheme.typography.headlineSmall.copy(
-                                                            fontWeight = FontWeight.Bold,
-                                                            fontSize = 20.sp
-                                                        ),
-                                                        color = TextPrimary,
-                                                        modifier = Modifier.padding(start = 48.dp, bottom = 12.dp)
-                                                    )
-                                                    TvLazyRow(
-                                                        contentPadding = PaddingValues(start = 48.dp, end = 48.dp, top = 12.dp, bottom = 12.dp),
-                                                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                                                        modifier = Modifier.fillMaxWidth().height(330.dp) // Height increased to 330.dp to give outer scaled box 100% stable bounds!
-                                                    ) {
-                                                        items(
-                                                            items = uiState.popularList,
-                                                            key = { "pop_${it.id}" }
-                                                        ) { anime ->
-                                                            AnimeCard(
-                                                                anime = anime,
-                                                                onClick = { onAnimeClick(anime) }
-                                                            )
-                                                        }
-                                                    }
-                                                }
+                                                TvCatalogRow(
+                                                    title = "Più popolari",
+                                                    animes = uiState.popularList,
+                                                    onAnimeClick = onAnimeClick
+                                                )
                                             }
                                         }
 
                                         // 4. ===== MOST VIEWED CATALOG ROW (mostViewedList - order=most_viewed) =====
                                         if (uiState.mostViewedList.isNotEmpty()) {
                                             item {
-                                                Column {
-                                                    Text(
-                                                        text = "Più visti",
-                                                        style = MaterialTheme.typography.headlineSmall.copy(
-                                                            fontWeight = FontWeight.Bold,
-                                                            fontSize = 20.sp
-                                                        ),
-                                                        color = TextPrimary,
-                                                        modifier = Modifier.padding(start = 48.dp, bottom = 12.dp)
-                                                    )
-                                                    TvLazyRow(
-                                                        contentPadding = PaddingValues(start = 48.dp, end = 48.dp, top = 12.dp, bottom = 12.dp),
-                                                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                                                        modifier = Modifier.fillMaxWidth().height(330.dp) // Height increased to 330.dp to give outer scaled box 100% stable bounds!
-                                                    ) {
-                                                        items(
-                                                            items = uiState.mostViewedList,
-                                                            key = { "view_${it.id}" }
-                                                        ) { anime ->
-                                                            AnimeCard(
-                                                                anime = anime,
-                                                                onClick = { onAnimeClick(anime) }
-                                                            )
-                                                        }
-                                                    }
-                                                }
+                                                TvCatalogRow(
+                                                    title = "Più visti",
+                                                    animes = uiState.mostViewedList,
+                                                    onAnimeClick = onAnimeClick
+                                                )
                                             }
                                         }
                                     }
@@ -498,6 +439,47 @@ fun HomeScreen(
                         }
                     }
                 }
+            }
+        }
+
+    }
+}
+
+/**
+ * A titled horizontal catalog row (section title + focusable poster cards). Shared by the
+ * "Continua a guardare", "Preferiti", "Più popolari" and "Più visti" sections so their layout and
+ * styling stay identical and defined in one place.
+ */
+@Composable
+private fun TvCatalogRow(
+    title: String,
+    animes: List<Anime>,
+    onAnimeClick: (Anime) -> Unit,
+    progressFor: ((Anime) -> Float?)? = null
+) {
+    Column {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.headlineSmall.copy(
+                fontWeight = FontWeight.Bold,
+                fontSize = 20.sp
+            ),
+            color = TextPrimary,
+            modifier = Modifier.padding(start = 48.dp, bottom = 12.dp)
+        )
+        TvLazyRow(
+            contentPadding = PaddingValues(start = 48.dp, end = 48.dp, top = 12.dp, bottom = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(330.dp)
+        ) {
+            items(items = animes, key = { it.id }) { anime ->
+                AnimeCard(
+                    anime = anime,
+                    progressRatio = progressFor?.invoke(anime),
+                    onClick = { onAnimeClick(anime) }
+                )
             }
         }
     }

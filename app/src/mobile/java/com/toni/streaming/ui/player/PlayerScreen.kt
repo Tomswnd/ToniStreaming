@@ -40,8 +40,15 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -75,11 +82,8 @@ import com.toni.streaming.ui.theme.AccentPurple
 import com.toni.streaming.ui.theme.DarkBackground
 import com.toni.streaming.ui.theme.TextPrimary
 import com.toni.streaming.ui.theme.TextSecondary
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -87,21 +91,25 @@ fun PlayerScreen(
     animeId: String,
     episodeId: String,
     episodeUrl: String,
-    repository: AnimeRepository,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     episodeNumber: Int = 0
 ) {
     val context = LocalContext.current
-    val viewModel = remember {
-        val appContext = context.applicationContext
-        PlayerViewModel(
-            repository, animeId, episodeId, episodeUrl, episodeNumber,
-            offlineStreamResolver = { epId ->
-                com.toni.streaming.download.DownloadCenter.buildOfflineStreamInfo(appContext, epId)
+    val repository = remember { AnimeRepository.getInstance(context) }
+    val viewModel: PlayerViewModel = viewModel(
+        factory = viewModelFactory {
+            initializer {
+                val appContext = context.applicationContext
+                PlayerViewModel(
+                    repository, animeId, episodeId, episodeUrl, episodeNumber,
+                    offlineStreamResolver = { epId ->
+                        com.toni.streaming.download.DownloadCenter.buildOfflineStreamInfo(appContext, epId)
+                    }
+                )
             }
-        )
-    }
+        }
+    )
     val uiState by viewModel.uiState.collectAsState()
 
     // Force Landscape orientation on mobile while watching video
@@ -152,6 +160,7 @@ fun PlayerScreen(
                         streamInfo = uiState.streamInfo!!,
                         animeId = animeId,
                         episodeId = uiState.currentEpisodeId,
+                        episodeNumber = uiState.currentEpisodeNumber,
                         startPositionMs = uiState.startPositionMs,
                         nextEpisode = uiState.nextEpisode,
                         onPlayNext = { viewModel.playEpisode(it) },
@@ -171,6 +180,7 @@ private fun VideoPlayer(
     streamInfo: StreamInfo,
     animeId: String,
     episodeId: String,
+    episodeNumber: Int,
     startPositionMs: Long,
     nextEpisode: Episode?,
     onPlayNext: (Episode) -> Unit,
@@ -180,275 +190,153 @@ private fun VideoPlayer(
 ) {
     val context = LocalContext.current
     var isControllerVisible by remember { mutableStateOf(true) }
+    var positionMs by remember { mutableStateOf(0L) }
+    var durationMs by remember { mutableStateOf(0L) }
+    var isPlaying by remember { mutableStateOf(true) }
+    var seekFeedback by remember { mutableStateOf<String?>(null) }
 
-    var timeRemainingSeconds by remember { mutableStateOf(0) }
-    var isNearEnd by remember { mutableStateOf(false) }
-    var isPlaybackEnded by remember { mutableStateOf(false) }
+    val (exoPlayer, playerState) = rememberManagedExoPlayer(
+        streamInfo = streamInfo,
+        repository = repository,
+        animeId = animeId,
+        episodeId = episodeId,
+        episodeNumber = episodeNumber,
+        startPositionMs = startPositionMs,
+        keepScreenOn = true,
+        // OkHttp upstream wrapped in the download cache: locally downloaded episodes
+        // are read from disk (and play offline); everything else streams as before.
+        dataSourceFactoryOverride = { info ->
+            com.toni.streaming.download.DownloadCenter.buildPlayerDataSourceFactory(
+                context = context,
+                upstreamClient = repository.httpClient,
+                userAgent = info.userAgent,
+                headers = info.headers
+            )
+        }
+    )
+    val hasNext = nextEpisode != null
 
-    // OkHttp upstream wrapped in the download cache: locally downloaded episodes
-    // are read from disk (and play offline); everything else streams as before.
-    val dataSourceFactory = remember(streamInfo) {
-        com.toni.streaming.download.DownloadCenter.buildPlayerDataSourceFactory(
-            context = context,
-            upstreamClient = repository.httpClient,
-            userAgent = streamInfo.userAgent,
-            headers = streamInfo.headers
-        )
-    }
-
-    val mediaSourceFactory = remember(dataSourceFactory) {
-        androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dataSourceFactory)
-    }
-
-    val mediaItem = remember(streamInfo) {
-        MediaItem.fromUri(streamInfo.m3u8Url)
-    }
-
-    val exoPlayer = remember {
-        ExoPlayer.Builder(context)
-            .setMediaSourceFactory(mediaSourceFactory)
-            .build()
-            .apply {
-                addListener(object : androidx.media3.common.Player.Listener {
-                    override fun onPlaybackStateChanged(playbackState: Int) {
-                        isPlaybackEnded = playbackState == androidx.media3.common.Player.STATE_ENDED
-                    }
-
-                    override fun onIsPlayingChanged(isPlaying: Boolean) {
-                        // Keep the screen awake while the video is actually playing;
-                        // allow it to time out normally when paused/stopped.
-                        val window = (context as? Activity)?.window ?: return
-                        if (isPlaying) {
-                            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                        } else {
-                            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                        }
-                    }
-                })
-                setMediaItem(mediaItem)
-                if (startPositionMs > 0) {
-                    seekTo(startPositionMs)
-                }
-                prepare()
-                playWhenReady = true
-            }
-    }
-
-    // Save watch history progress and detect video ending
+    // Poll the player for the scrubber / play-state (UI only).
     LaunchedEffect(exoPlayer) {
         while (isActive) {
-            delay(1000)
-            val currentPos = exoPlayer.currentPosition
-            val duration = exoPlayer.duration
-            if (duration > 0 && currentPos > 0) {
-                repository.saveWatchProgress(
-                    episodeId = episodeId,
-                    animeId = animeId,
-                    position = currentPos,
-                    duration = duration,
-                    animeTitle = streamInfo.animeTitle,
-                    animeImageUrl = streamInfo.animeImageUrl,
-                    animeSlug = streamInfo.animeSlug
-                )
-
-                val remainingMs = duration - currentPos
-                timeRemainingSeconds = (remainingMs / 1000).toInt()
-                isNearEnd = remainingMs < 30_000
-            }
+            try {
+                positionMs = exoPlayer.currentPosition.coerceAtLeast(0L)
+                durationMs = exoPlayer.duration.coerceAtLeast(0L)
+                isPlaying = exoPlayer.isPlaying
+            } catch (_: Exception) {}
+            delay(400)
         }
     }
 
-    // Pause playback when the app goes to the background so it doesn't keep playing off-screen.
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, exoPlayer) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
-                exoPlayer.pause()
-            }
+    // Auto-hide the controls a few seconds after they appear, while playing.
+    LaunchedEffect(isControllerVisible, isPlaying, playerState.isPlaybackEnded) {
+        if (isControllerVisible && isPlaying && !playerState.isPlaybackEnded) {
+            delay(4000)
+            isControllerVisible = false
         }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            val currentPos = exoPlayer.currentPosition
-            val duration = exoPlayer.duration
-            if (duration > 0 && currentPos > 0) {
-                @Suppress("OPT_IN_USAGE")
-                GlobalScope.launch(Dispatchers.IO) {
-                    repository.saveWatchProgress(
-                        episodeId = episodeId,
-                        animeId = animeId,
-                        position = currentPos,
-                        duration = duration,
-                        animeTitle = streamInfo.animeTitle,
-                        animeImageUrl = streamInfo.animeImageUrl,
-                        animeSlug = streamInfo.animeSlug
-                    )
-                }
-            }
-            exoPlayer.release()
-            // Make sure the screen can time out again once we leave the player.
-            (context as? Activity)?.window
-                ?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    // Reveal the controls when the video ends so the next / back buttons are reachable.
+    LaunchedEffect(playerState.isPlaybackEnded) {
+        if (playerState.isPlaybackEnded) isControllerVisible = true
+    }
+    // Auto-advance to the next episode a few seconds after the video ends (mobile convenience).
+    LaunchedEffect(playerState.isPlaybackEnded) {
+        if (playerState.isPlaybackEnded && nextEpisode != null) {
+            delay(5000)
+            onPlayNext(nextEpisode)
+        }
+    }
+    LaunchedEffect(seekFeedback) {
+        if (seekFeedback != null) {
+            delay(650)
+            seekFeedback = null
         }
     }
 
-    Box(
-        modifier = modifier
-    ) {
+    fun togglePlayPause() {
+        try {
+            if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
+            isPlaying = exoPlayer.isPlaying
+        } catch (_: Exception) {}
+    }
+    fun seekBy(deltaMs: Long) {
+        try {
+            val dur = exoPlayer.duration
+            val target = (exoPlayer.currentPosition + deltaMs)
+                .coerceIn(0L, if (dur > 0) dur else Long.MAX_VALUE)
+            exoPlayer.seekTo(target)
+            positionMs = target
+        } catch (_: Exception) {}
+    }
+
+    Box(modifier = modifier) {
         AndroidView(
             factory = { ctx ->
-                PlayerView(ctx).apply {
-                    player = exoPlayer
-                    useController = true
+                val view = android.view.LayoutInflater.from(ctx)
+                    .inflate(com.toni.streaming.R.layout.custom_player_view, null) as PlayerView
+                view.apply {
                     setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-                    
-                    setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
-                        isControllerVisible = visibility == android.view.View.VISIBLE
-                    })
                 }
+            },
+            update = { view ->
+                view.player = exoPlayer
             },
             modifier = Modifier.fillMaxSize()
         )
 
-        // Floating Back Button (visible when controllers are showing)
-        AnimatedVisibility(
-            visible = isControllerVisible || isPlaybackEnded,
-            enter = fadeIn(),
-            exit = fadeOut(),
+        // Touch layer: single tap toggles the controls, double-tap on a side seeks ±10s.
+        Box(
             modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(16.dp)
-        ) {
-            IconButton(
-                onClick = onBack,
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onTap = { isControllerVisible = !isControllerVisible },
+                        onDoubleTap = { offset ->
+                            if (offset.x > size.width / 2f) {
+                                seekBy(10_000); seekFeedback = "+10s"
+                            } else {
+                                seekBy(-10_000); seekFeedback = "-10s"
+                            }
+                        }
+                    )
+                }
+        )
+
+        // Brief visual feedback for the double-tap seek.
+        seekFeedback?.let { label ->
+            Box(
                 modifier = Modifier
-                    .size(44.dp)
-                    .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(50))
+                    .align(if (label.startsWith("+")) Alignment.CenterEnd else Alignment.CenterStart)
+                    .padding(horizontal = 48.dp)
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(50))
+                    .padding(horizontal = 20.dp, vertical = 12.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Default.ArrowBack,
-                    contentDescription = "Indietro",
-                    tint = Color.White
-                )
+                Text(label, color = Color.White, fontWeight = FontWeight.Bold)
             }
         }
 
-        // ===== NEXT EPISODE TOUCH OVERLAYS =====
-        if (nextEpisode != null) {
-            // Case 1: Video ended entirely -> full screen overlay with auto countdown
-            if (isPlaybackEnded) {
-                // Auto play next episode after 5 seconds if user does not touch
-                LaunchedEffect(Unit) {
-                    delay(5000)
-                    onPlayNext(nextEpisode)
-                }
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.85f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Text(
-                            text = "Episodio Completato",
-                            color = TextSecondary,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        // Large touch clickable button
-                        Button(
-                            onClick = { onPlayNext(nextEpisode) },
-                            shape = RoundedCornerShape(12.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = AccentPurple),
-                            modifier = Modifier
-                                .shadow(8.dp, RoundedCornerShape(12.dp))
-                                .background(
-                                    brush = Brush.horizontalGradient(colors = listOf(AccentPurple, AccentBlue)),
-                                    shape = RoundedCornerShape(12.dp)
-                                )
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.PlayArrow,
-                                    contentDescription = null,
-                                    tint = Color.White
-                                )
-                                Text(
-                                    text = "Prossimo Episodio: Ep. ${nextEpisode.number}",
-                                    color = Color.White,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "Riproduzione automatica tra pochi istanti…",
-                            color = TextSecondary.copy(alpha = 0.7f),
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                }
-            } 
-            // Case 2: Video nearing end -> Netflix-like popup in bottom-right (touchable)
-            else if (isNearEnd) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(bottom = 64.dp, end = 24.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable { onPlayNext(nextEpisode) }
-                        .shadow(4.dp, RoundedCornerShape(12.dp))
-                        .background(
-                            brush = Brush.horizontalGradient(colors = listOf(AccentPurple, AccentBlue)),
-                            shape = RoundedCornerShape(12.dp)
-                        )
-                        .padding(horizontal = 16.dp, vertical = 10.dp)
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.Start
-                    ) {
-                        Text(
-                            text = "PROSSIMO EPISODIO IN ARRIVO",
-                            color = Color.White.copy(alpha = 0.8f),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text(
-                                text = "Episodio ${nextEpisode.number}",
-                                color = Color.White,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.ExtraBold
-                            )
-                            Text(
-                                text = "tocca per avviare (tra ${timeRemainingSeconds}s)",
-                                color = Color.White.copy(alpha = 0.8f),
-                                style = MaterialTheme.typography.bodySmall,
-                                fontSize = 11.sp
-                            )
-                        }
-                    }
-                }
-            }
+        // Shared controls overlay (same layout as TV; driven by touch here).
+        AnimatedVisibility(
+            visible = isControllerVisible || playerState.isPlaybackEnded,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            PlayerControlsOverlay(
+                isPlaying = isPlaying,
+                positionMs = positionMs,
+                durationMs = durationMs,
+                hasNext = hasNext,
+                isNearEnd = playerState.isNearEnd,
+                isPlaybackEnded = playerState.isPlaybackEnded,
+                timeRemainingSeconds = playerState.timeRemainingSeconds,
+                onBack = onBack,
+                onPlayPause = { togglePlayPause() },
+                onRewind = { seekBy(-10_000) },
+                onForward = { seekBy(10_000) },
+                onNext = { nextEpisode?.let { onPlayNext(it) } },
+                onSeekTo = { ms -> exoPlayer.seekTo(ms); positionMs = ms }
+            )
         }
     }
 }

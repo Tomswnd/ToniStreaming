@@ -35,7 +35,11 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,6 +67,7 @@ import androidx.tv.material3.IconButtonDefaults
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
+import java.util.Locale
 import com.toni.streaming.data.model.Episode
 import com.toni.streaming.data.model.RelatedAnime
 import com.toni.streaming.data.repository.AnimeRepository
@@ -81,13 +86,16 @@ import com.toni.streaming.ui.theme.TextSecondary
 fun DetailScreen(
     animeId: String,
     animeUrl: String,
-    repository: AnimeRepository,
     onEpisodeClick: (Episode) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     onRelatedClick: (RelatedAnime) -> Unit = {}
 ) {
-    val viewModel = remember { DetailViewModel(repository, animeUrl, animeId) }
+    val context = LocalContext.current
+    val repository = remember { AnimeRepository.getInstance(context) }
+    val viewModel: DetailViewModel = viewModel(
+        factory = viewModelFactory { initializer { DetailViewModel(repository, animeUrl, animeId) } }
+    )
     val uiState by viewModel.uiState.collectAsState()
 
     // Reload progress each time we return to this screen to show updated checkmarks/progress
@@ -194,7 +202,7 @@ fun DetailScreen(
                             if (details.score > 0f) {
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = "★ ${String.format("%.1f", details.score)}",
+                                    text = "★ ${String.format(Locale.US, "%.1f", details.score)}",
                                     style = MaterialTheme.typography.titleMedium,
                                     color = Color(0xFFFFC107),
                                     maxLines = 1
@@ -569,8 +577,8 @@ private fun formatTime(ms: Long): String {
     val hours = totalMinutes / 60
 
     return if (hours > 0) {
-        String.format("%02d:%02d:%02d", hours, minutes, seconds)
+        String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, seconds)
     } else {
-        String.format("%02d:%02d", minutes, seconds)
+        String.format(Locale.US, "%02d:%02d", minutes, seconds)
     }
 }

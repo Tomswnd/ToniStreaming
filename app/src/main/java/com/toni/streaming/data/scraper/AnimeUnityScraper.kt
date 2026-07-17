@@ -518,14 +518,13 @@ class AnimeUnityScraper {
             builder.header("X-CSRF-TOKEN", csrfToken)
         }
 
-        val response = httpClient.newCall(builder.build()).execute()
-        if (response.code != 200) {
-            response.close()
-            Log.w(TAG, "info_api returned ${response.code} for range $start-$end")
-            return emptyList()
+        val body = httpClient.newCall(builder.build()).execute().use { response ->
+            if (response.code != 200) {
+                Log.w(TAG, "info_api returned ${response.code} for range $start-$end")
+                return emptyList()
+            }
+            response.body?.string() ?: ""
         }
-        val body = response.body?.string() ?: ""
-        response.close()
 
         Log.d(TAG, "info_api range $start-$end fetched (${body.length} bytes)")
         return parseJsonEpisodesArray(extractEpisodesArray(body), animeId, animeUrl)
@@ -586,10 +585,13 @@ class AnimeUnityScraper {
      */
     private fun parseJsonEpisodesArray(json: String, animeId: String, animeUrl: String): List<Episode> {
         val episodes = mutableListOf<Episode>()
-        val epRegex = """\{[^{}]*"number"\s*:\s*"?(\d+)"?[^{}]*\}""".toRegex()
-        epRegex.findAll(json).forEach { match ->
-            val epNum = match.groupValues[1].toIntOrNull() ?: return@forEach
-            val epId = extractJsonValue(match.value, "id") ?: "${animeId}_ep$epNum"
+        val digits = Regex("""\d+""")
+        // Split the array into balanced top-level {...} objects so no episode is missed even if
+        // an object's fields contain unusual content (the old flat regex could skip entries).
+        forEachTopLevelJsonObject(json) { obj ->
+            val numStr = extractJsonValue(obj, "number") ?: return@forEachTopLevelJsonObject
+            val epNum = digits.find(numStr)?.value?.toIntOrNull() ?: return@forEachTopLevelJsonObject
+            val epId = extractJsonValue(obj, "id") ?: "${animeId}_ep$epNum"
             episodes.add(
                 Episode(
                     id = epId,
@@ -599,7 +601,7 @@ class AnimeUnityScraper {
                 )
             )
         }
-        return episodes.sortedBy { it.number }
+        return episodes.distinctBy { it.number }.sortedBy { it.number }
     }
 
     // ========== HTTP HELPERS ==========
@@ -613,19 +615,17 @@ class AnimeUnityScraper {
             .header("Referer", "$BASE_URL/")
             .build()
 
-        val response = httpClient.newCall(request).execute()
-
-        if (response.code == 403) {
-            response.close()
-            throw ScrapingException.CloudflareBlockedException()
+        val (body, code) = httpClient.newCall(request).execute().use { response ->
+            if (response.code == 403) {
+                throw ScrapingException.CloudflareBlockedException()
+            }
+            val b = response.body?.string() ?: throw ScrapingException.NetworkException(
+                RuntimeException("Empty response body from $url")
+            )
+            b to response.code
         }
 
-        val body = response.body?.string() ?: throw ScrapingException.NetworkException(
-            RuntimeException("Empty response body from $url")
-        )
-        response.close()
-
-        Log.d(TAG, "Fetched $url (${body.length} bytes, status=${response.code})")
+        Log.d(TAG, "Fetched $url (${body.length} bytes, status=$code)")
         return Jsoup.parse(body, url)
     }
 
@@ -647,134 +647,6 @@ class AnimeUnityScraper {
             }
         }
         return emptyList()
-    }
-
-    /**
-     * Extracts a string value for a given key from a JSON object string.
-     * Handles escaped characters in values.
-     */
-    fun extractJsonString(json: String, key: String): String? {
-        // Match "key":"value" with possible escapes
-        val regex = """"$key"\s*:\s*"((?:[^"\\]|\\.)*)"""".toRegex()
-        return regex.find(json)?.groupValues?.get(1)?.let { value ->
-            // Unescape common JSON escapes
-            value.replace("\\/", "/")
-                .replace("\\\"", "\"")
-                .replace("\\n", "\n")
-                .replace("\\t", "\t")
-                .replace("\\\\", "\\")
-        }
-    }
-
-    /**
-     * Extracts a string value for [key] that lives at the TOP LEVEL (depth 1) of the JSON object,
-     * ignoring identical keys nested inside arrays/sub-objects (e.g. related-anime entries).
-     * Returns null if the key is absent or its value is not a string (e.g. null/number).
-     */
-    fun extractTopLevelJsonString(json: String, key: String): String? {
-        val target = "\"$key\""
-        var i = 0
-        var depth = 0
-        while (i < json.length) {
-            when (json[i]) {
-                '{', '[' -> { depth++; i++ }
-                '}', ']' -> { depth--; i++ }
-                '"' -> {
-                    if (depth == 1 && json.startsWith(target, i)) {
-                        var j = i + target.length
-                        while (j < json.length && json[j].isWhitespace()) j++
-                        if (j < json.length && json[j] == ':') {
-                            j++
-                            while (j < json.length && json[j].isWhitespace()) j++
-                            if (j < json.length && json[j] == '"') {
-                                val sb = StringBuilder()
-                                j++
-                                while (j < json.length) {
-                                    val ch = json[j]
-                                    if (ch == '\\' && j + 1 < json.length) {
-                                        sb.append(ch).append(json[j + 1]); j += 2; continue
-                                    }
-                                    if (ch == '"') break
-                                    sb.append(ch); j++
-                                }
-                                return sb.toString()
-                                    .replace("\\/", "/")
-                                    .replace("\\\"", "\"")
-                                    .replace("\\n", "\n")
-                                    .replace("\\t", "\t")
-                                    .replace("\\\\", "\\")
-                            }
-                            // top-level key present but value is null/number/etc → no string value
-                            return null
-                        }
-                    }
-                    // skip the rest of this string token so its content doesn't affect depth
-                    i++
-                    while (i < json.length) {
-                        if (json[i] == '\\') { i += 2; continue }
-                        if (json[i] == '"') { i++; break }
-                        i++
-                    }
-                }
-                else -> i++
-            }
-        }
-        return null
-    }
-
-    /**
-     * Extracts a raw value (number, boolean, null) for a given key from a JSON object string.
-     */
-    private fun extractJsonValue(json: String, key: String): String? {
-        // Match "key": value (number, boolean, null)
-        val numRegex = """"$key"\s*:\s*(\d+)""".toRegex()
-        numRegex.find(json)?.let { return it.groupValues[1] }
-
-        // Also try string value
-        return extractJsonString(json, key)
-    }
-
-    /**
-     * Helper to decode dynamic unicode hex values like \u00e8 to their respective characters.
-     */
-    private fun decodeUnicode(input: String): String {
-        val regex = """\\u([0-9a-fA-F]{4})""".toRegex()
-        return regex.replace(input) { matchResult ->
-            try {
-                val hexVal = matchResult.groupValues[1]
-                val charCode = hexVal.toInt(16)
-                charCode.toChar().toString()
-            } catch (e: Exception) {
-                matchResult.value
-            }
-        }
-    }
-
-    /**
-     * Utility method to clean escaping and special Unicode characters in scraped text.
-     */
-    fun cleanText(text: String): String {
-        val decoded = decodeUnicode(text)
-        return decoded
-            .replace("\\u201c", "“")
-            .replace("\\u201d", "”")
-            .replace("\\u2018", "‘")
-            .replace("\\u2019", "’")
-            .replace("\\u2013", "–")
-            .replace("\\u2014", "—")
-            .replace("\\u200b", "")
-            .replace("\\u00a0", " ")
-            .replace("&quot;", "\"")
-            .replace("&apos;", "'")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("\\n", "\n")
-            .replace("\\\"", "\"")
-            .replace("\\'", "'")
-            .replace("\\/", "/")
-            .replace("\\r", "")
-            .trim()
     }
 }
 

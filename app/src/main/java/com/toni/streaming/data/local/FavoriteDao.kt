@@ -11,6 +11,12 @@ interface FavoriteDao {
     @Upsert
     suspend fun upsert(entity: FavoriteEntity)
 
+    @Upsert
+    suspend fun upsertAll(entities: List<FavoriteEntity>)
+
+    @Query("SELECT * FROM favorites")
+    suspend fun getAllNow(): List<FavoriteEntity>
+
     @Query("DELETE FROM favorites WHERE animeId = :animeId")
     suspend fun delete(animeId: String)
 

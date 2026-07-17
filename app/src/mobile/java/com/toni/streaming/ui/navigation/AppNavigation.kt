@@ -2,15 +2,12 @@ package com.toni.streaming.ui.navigation
 
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import androidx.compose.ui.platform.LocalContext
-import com.toni.streaming.data.repository.AnimeRepository
 import com.toni.streaming.ui.detail.DetailScreen
 import com.toni.streaming.ui.home.HomeScreen
 import com.toni.streaming.ui.player.PlayerScreen
@@ -22,8 +19,6 @@ fun AppNavigation(
     modifier: Modifier = Modifier
 ) {
     val navController = rememberNavController()
-    val context = LocalContext.current
-    val repository = remember { AnimeRepository(context) }
 
     NavHost(
         navController = navController,
@@ -32,7 +27,6 @@ fun AppNavigation(
     ) {
         composable(route = Screen.Home.route) {
             HomeScreen(
-                repository = repository,
                 onAnimeClick = { anime ->
                     val encodedUrl = URLEncoder.encode(anime.episodeUrl, "UTF-8")
                     navController.navigate(
@@ -57,7 +51,6 @@ fun AppNavigation(
             DetailScreen(
                 animeUrl = animeUrl,
                 animeId = animeId,
-                repository = repository,
                 onEpisodeClick = { episode ->
                     val encodedUrl = URLEncoder.encode(episode.url, "UTF-8")
                     navController.navigate(
@@ -92,7 +85,6 @@ fun AppNavigation(
                 animeId = animeId,
                 episodeId = episodeId,
                 episodeUrl = episodeUrl,
-                repository = repository,
                 onBack = { navController.popBackStack() },
                 episodeNumber = episodeNumber
             )

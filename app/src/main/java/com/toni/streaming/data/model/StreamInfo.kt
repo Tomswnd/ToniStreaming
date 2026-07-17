@@ -2,6 +2,7 @@ package com.toni.streaming.data.model
 
 data class StreamInfo(
     val m3u8Url: String,
+    val isHls: Boolean = false,
     val referer: String,
     val userAgent: String = "",
     val headers: Map<String, String> = emptyMap(),

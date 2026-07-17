@@ -63,11 +63,12 @@ class PlayerViewModel(
     private fun loadProgressAndExtractStream() {
         viewModelScope.launch {
             _uiState.update { it.copy(
-                isLoading = true, 
-                error = null, 
-                streamInfo = null, 
+                isLoading = true,
+                error = null,
+                streamInfo = null,
                 nextEpisode = null,
-                currentEpisodeId = episodeId
+                currentEpisodeId = episodeId,
+                currentEpisodeNumber = episodeNumber
             ) }
 
             // Load saved watch progress
